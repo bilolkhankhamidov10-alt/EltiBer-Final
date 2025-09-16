@@ -4,6 +4,12 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     FSInputFile
 )
+# CopyTextButton yangi Telegram Bot API’da bor. Aiogram versiyangizda bo‘lmasa, fallback ishlaydi.
+try:
+    from aiogram.types import CopyTextButton
+    SUPPORTS_COPY_TEXT = True
+except Exception:
+    SUPPORTS_COPY_TEXT = False
 
 from aiogram.filters import Command, CommandStart
 import asyncio
@@ -12,7 +18,6 @@ import os
 import json
 from typing import Any
 import csv
-from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
 # ================== SOZLAMALAR ==================
@@ -36,7 +41,6 @@ def format_card_number(card: str) -> str:
 
 
 CARD_NUMBER_DISPLAY = format_card_number(CARD_NUMBER)
-CARD_NUMBER_LINK = f"https://t.me/share/url?url={quote_plus(CARD_NUMBER)}&text={quote_plus(CARD_NUMBER_DISPLAY)}"
 
 bot = Bot(token=TOKEN)
 dp  = Dispatcher()
@@ -443,7 +447,7 @@ async def trial_watcher():
                     pay_text = (
                         "⛔️ <b>30 kunlik bepul sinov muddati tugadi.</b>\n\n"
                         f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
-                        f"🧾 <b>Karta:</b> <a href=\"{CARD_NUMBER_LINK}\">{CARD_NUMBER_DISPLAY}</a>\n"
+                        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER_DISPLAY}</code>\n"
                         f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
                         "✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring.\n"
                         "Tasdiqlangach, sizga <b>Haydovchilar guruhi</b>ga qayta qo‘shilish havolasini yuboramiz."
@@ -518,7 +522,7 @@ async def after_phone_collected(uid: int, message: types.Message):
     price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
     pay_text = (
         f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
-        f"🧾 <b>Karta:</b> <a href=\"{CARD_NUMBER_LINK}\">{CARD_NUMBER_DISPLAY}</a>\n"
+        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER_DISPLAY}</code>\n"
         f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
         f"✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring (screenshot ham bo‘ladi).\n"
         f"⚠️ <b>Ogohlantirish:</b> soxtalashtirilgan chek yuborgan shaxsga "
