@@ -36,11 +36,7 @@ CARD_NUMBER = "5614682216212664"
 CARD_HOLDER = "BILOL HAMIDOV"
 SUBSCRIPTION_PRICE = 99_000
 
-def format_card_number(card: str) -> str:
-    return " ".join(card[i:i+4] for i in range(0, len(card), 4))
-
-
-CARD_NUMBER_DISPLAY = format_card_number(CARD_NUMBER)
+CARD_NUMBER_DISPLAY = CARD_NUMBER
 
 bot = Bot(token=TOKEN)
 dp  = Dispatcher()
@@ -453,7 +449,21 @@ async def trial_watcher():
                         "Tasdiqlangach, sizga <b>Haydovchilar guruhi</b>ga qayta qo‘shilish havolasini yuboramiz."
                     )
 
-                    rows = [[InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]]
+                    if SUPPORTS_COPY_TEXT:
+                        rows = [
+                            [InlineKeyboardButton(
+                                text="📋 Karta raqamini nusxalash",
+                                copy_text=CopyTextButton(text=CARD_NUMBER)
+                            )]
+                        ]
+                    else:
+                        rows = [
+                            [InlineKeyboardButton(
+                                text="📋 Karta raqamini nusxalash",
+                                switch_inline_query_current_chat=CARD_NUMBER
+                            )]
+                        ]
+                    rows.append([InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")])
                     ikb = InlineKeyboardMarkup(inline_keyboard=rows)
 
                     # "Chekni yuborish" callback'i ishlashi uchun stage'ni tayyorlab qo'yamiz
@@ -529,7 +539,21 @@ async def after_phone_collected(uid: int, message: types.Message):
         f"<b>jinoyiy javobgarlik</b> qo‘llanilishi mumkin."
     )
 
-    rows = [[InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]]
+    if SUPPORTS_COPY_TEXT:
+        rows = [
+            [InlineKeyboardButton(
+                text="📋 Karta raqamini nusxalash",
+                copy_text=CopyTextButton(text=CARD_NUMBER)
+            )]
+        ]
+    else:
+        rows = [
+            [InlineKeyboardButton(
+                text="📋 Karta raqamini nusxalash",
+                switch_inline_query_current_chat=CARD_NUMBER
+            )]
+        ]
+    rows.append([InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")])
     ikb = InlineKeyboardMarkup(inline_keyboard=rows)
     await message.answer(
         "Ma’lumotlaringiz qabul qilindi ✅\n\n"
