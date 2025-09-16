@@ -4,12 +4,6 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     FSInputFile
 )
-# CopyTextButton yangi Telegram Bot API’da bor. Aiogram versiyangizda bo‘lmasa, fallback ishlaydi.
-try:
-    from aiogram.types import CopyTextButton
-    SUPPORTS_COPY_TEXT = True
-except Exception:
-    SUPPORTS_COPY_TEXT = False
 
 from aiogram.filters import Command, CommandStart
 import asyncio
@@ -449,16 +443,13 @@ async def trial_watcher():
                         "Tasdiqlangach, sizga <b>Haydovchilar guruhi</b>ga qayta qo‘shilish havolasini yuboramiz."
                     )
 
-                    rows = []
-                    if SUPPORTS_COPY_TEXT:
-                        rows.append([
-                            InlineKeyboardButton(
-                                text="📋 Karta raqamini nusxalash",
-                                copy_text=CopyTextButton(text=CARD_NUMBER)
-                            )
-                        ])
-                    rows.append([InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")])
-                    ikb = InlineKeyboardMarkup(inline_keyboard=rows)
+                    ikb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text="📋 Karta raqamini nusxalash",
+                            callback_data="copy_card"
+                        )],
+                        [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
+                    ])
 
                     # "Chekni yuborish" callback'i ishlashi uchun stage'ni tayyorlab qo'yamiz
                     driver_onboarding[uid] = driver_onboarding.get(uid, {})
@@ -533,16 +524,13 @@ async def after_phone_collected(uid: int, message: types.Message):
         f"<b>jinoyiy javobgarlik</b> qo‘llanilishi mumkin."
     )
 
-    rows = []
-    if SUPPORTS_COPY_TEXT:
-        rows.append([
-            InlineKeyboardButton(
-                text="📋 Karta raqamini nusxalash",
-                copy_text=CopyTextButton(text=CARD_NUMBER)
-            )
-        ])
-    rows.append([InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")])
-    ikb = InlineKeyboardMarkup(inline_keyboard=rows)
+    ikb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📋 Karta raqamini nusxalash",
+            callback_data="copy_card"
+        )],
+        [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
+    ])
     await message.answer(
         "Ma’lumotlaringiz qabul qilindi ✅\n\n"
         f"👤 <b>F.I.Sh:</b> {name}\n"
@@ -562,6 +550,18 @@ async def send_check_cb(callback: types.CallbackQuery):
     driver_onboarding[uid]["stage"] = "wait_check"
     await callback.message.answer("📸 Iltimos, <b>chek rasmini</b> bitta rasm ko‘rinishida yuboring (screenshot ham bo‘ladi).", parse_mode="HTML")
     await callback.answer()
+
+
+@dp.callback_query(F.data == "copy_card")
+async def copy_card_cb(callback: types.CallbackQuery):
+    try:
+        await callback.answer("Karta raqami xabar sifatida yuborildi", show_alert=True)
+    except Exception:
+        pass
+    try:
+        await callback.message.answer(f"💳 Karta raqami: <code>{CARD_NUMBER_DISPLAY}</code>", parse_mode="HTML")
+    except Exception:
+        pass
 
 # ================== CHEK LOGIKA: caption & yuborish helperlari ==================
 def _make_payment_kb(driver_id: int) -> InlineKeyboardMarkup:
