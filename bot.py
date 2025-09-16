@@ -15,10 +15,18 @@ from aiogram.filters import Command, CommandStart
 import asyncio
 from datetime import datetime, timedelta, time as dtime
 import os
+import json
+from typing import Any
+import csv
+from dotenv import load_dotenv
 
 # ================== SOZLAMALAR ==================
-TOKEN = "8305786670:AAHTVPYg6krEnOGi2wEX2yCovjH7R3lIpxM"    # BotFather token
-DRIVERS_CHAT_ID  = -4917715168         # Haydovchilar guruhi ID (buyurtmalar)
+load_dotenv()
+
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is not set")
+DRIVERS_CHAT_ID  = -1002978372872         # Haydovchilar guruhi ID (buyurtmalar)
 RATINGS_CHAT_ID  = -4861064259         # 📊 Baholar log guruhi
 PAYMENTS_CHAT_ID = -4925556700         # 💳 Cheklar guruhi
 
@@ -39,13 +47,67 @@ CONTACT_IMAGE_PATH = os.path.join(ASSETS_DIR, "EltiBer.png")
 ESLATMA_IMAGE_PATH = os.path.join(ASSETS_DIR, "ESLATMA.png")
 CONTACT_IMAGE_URL  = ""   # xohlasa zahira URL
 
+# ======= PERSISTENCE (user_profiles -> JSON) =======
+DATA_DIR = os.path.join(BASE_DIR, "data")
+USERS_JSON = os.path.join(DATA_DIR, "users.json")
+STORE_LOCK = asyncio.Lock()
+
+def _ensure_data_dir():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+def _load_json(path: str, default: Any):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+async def _save_json(path: str, data: Any):
+    _ensure_data_dir()
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+def load_users_from_disk() -> dict:
+    raw = _load_json(USERS_JSON, {})
+    fixed = {}
+    # JSON kalitlari string bo'lib keladi -> int'ga aylantiramiz
+    for k, v in (raw or {}).items():
+        try:
+            ik = int(k)
+        except (ValueError, TypeError):
+            ik = k
+        fixed[ik] = v
+    return fixed
+
+async def save_users_to_disk(users: dict):
+    async with STORE_LOCK:
+        # Diskka yozishda kalitlarni string ko'rinishida saqlash — normal
+        await _save_json(USERS_JSON, {str(k): v for k, v in (users or {}).items()})
+
 # ================== XOTIRA (RAM) ==================
-user_profiles = {}   # {uid: {"name":..., "phone":...}}
+user_profiles = load_users_from_disk()
 drafts = {}          # {customer_id: {...}}
 driver_onboarding = {}  # {uid: {"stage":..., "name":..., "car_make":..., "car_plate":..., "phone":...}}
 orders = {}             # {customer_id: {...}}
 driver_links = {}
 pending_invites = {}    # {driver_id: {"msg_id":..., "link":...}}
+
+# ======= FREE TRIAL (30 kun bepul) — QO'SHIMCHA =======
+FREE_TRIAL_ENABLED = True
+FREE_TRIAL_DAYS = 30
+subscriptions = {}   # {driver_id: {"active": True}}
+trial_members = {}   # {driver_id: {"expires_at": datetime}}
 
 # ================== LABELLAR ==================
 CANCEL = "❌ Bekor qilish"
@@ -72,8 +134,8 @@ def keyboard_with_back_cancel(options, per_row=3, show_back=True):
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 def vehicle_keyboard():
-    VEHICLES = ["Labo", "Damas", "Porter", "Isuzu", "Sprintor", "Vito"]
-    return keyboard_with_back_cancel(VEHICLES, per_row=3, show_back=False)
+    VEHICLES = ["🛻 Labo", "🚚 Labodan Kattaroq"]
+    return keyboard_with_back_cancel(VEHICLES, per_row=1, show_back=False)
 
 def contact_keyboard(text="📲 Telefon raqamni yuborish"):
     return ReplyKeyboardMarkup(
@@ -131,15 +193,24 @@ async def start_command(message: types.Message):
     else:
         await message.answer("Quyidagi menyudan tanlang 👇", reply_markup=order_keyboard())
 
+# ✅ Bitta handler yetadi (oldin 2 marta yozilgan edi)
 @dp.message(F.contact)
 async def contact_received(message: types.Message):
     uid = message.from_user.id
-    phone = message.contact.phone_number
-    user_profiles[uid] = {"name": message.from_user.full_name, "phone": phone}
+    raw_phone = message.contact.phone_number or ""
+    phone = raw_phone if raw_phone.startswith("+") else f"+{raw_phone}"
+
+    profile = user_profiles.get(uid, {})
+    profile.update({"name": message.from_user.full_name, "phone": phone})
+    user_profiles[uid] = profile
+    await save_users_to_disk(user_profiles)
+
+    # Onboardingning phone bosqichida bo'lsa — driver_onboarding ichiga ham yozib qo'yamiz
     if uid in driver_onboarding and driver_onboarding[uid].get("stage") == "phone":
-        driver_onboarding[uid]["phone"] = phone if phone.startswith("+") else f"+{phone}"
+        driver_onboarding[uid]["phone"] = phone
         await after_phone_collected(uid, message)
         return
+
     await message.answer("✅ Telefon raqamingiz saqlandi.", reply_markup=types.ReplyKeyboardRemove())
     await message.answer("Endi quyidagi menyudan tanlang 👇", reply_markup=order_keyboard())
 
@@ -187,6 +258,7 @@ async def prompt_order_flow(message: types.Message):
         await message.answer("Iltimos, telefon raqamingizni yuboring 📞", reply_markup=contact_keyboard())
         return
 
+    # Soddalashtirilgan oqim: to‘g‘ridan-to‘g‘ri
     drafts[uid] = {"stage": "vehicle", "vehicle": None, "from": None, "to": None, "when": None}
     await message.answer(
         "🚚 Qanday yuk mashinasi kerak?\nQuyidagidan tanlang yoki o‘zingiz yozing:",
@@ -226,7 +298,6 @@ async def haydovchi_bolish(message: types.Message):
         "1) Buyurtma guruhdan “Qabul qilish” orqali olinadi; <b>narx/vaqt/manzil</b> — haydovchi ↔ mijoz o‘rtasida <b>bevosita</b> kelishiladi.\n"
         "2) <b>EltiBer ma’muriyati</b> narx, to‘lov va yetkazish jarayoniga <b>aralashmaydi</b> va <b>javobgar emas</b>.\n"
         "3) Borolmasangiz — darhol mijozga xabar bering va bekor qiling.\n\n"
-        "⛔️ <b>Ogohlantirish:</b> soxtalashtirilgan chek yuborgan shaxsga nisbatan <b>jinoyiy javobgarlik</b> qo‘llanilishi mumkin."
     )
     ikb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Shartlarga roziman", callback_data="driver_agree")]
@@ -244,14 +315,19 @@ async def driver_agree_cb(callback: types.CallbackQuery):
 @dp.message(F.text)
 async def onboarding_or_order_text(message: types.Message):
     uid = message.from_user.id
+    txt = (message.text or "").strip()
+
+    if txt == BACK:
+        await back_flow(message)
+        return
+
     if uid in driver_onboarding:
         st = driver_onboarding[uid].get("stage")
-        txt = (message.text or "").strip()
 
         if st == "name":
             driver_onboarding[uid]["name"] = txt
             driver_onboarding[uid]["stage"] = "car_make"
-            await message.answer("🚗 Avtomobil <b>markasi</b>ni yozing (masalan: Damas / Porter / Isuzu):", parse_mode="HTML", reply_markup=keyboard_with_back_cancel([], show_back=True))
+            await message.answer("🚗 Avtomobil <b>markasi</b>ni yozing (masalan: Labo / Porter / Isuzu):", parse_mode="HTML", reply_markup=keyboard_with_back_cancel([], show_back=True))
             return
 
         if st == "car_make":
@@ -283,6 +359,125 @@ async def onboarding_or_order_text(message: types.Message):
     # Onboarding bo'lmasa — buyurtma oqimi
     await collect_flow(message)
 
+# ================== YORDAMCHI (trial) — QO'SHIMCHA ==================
+async def _send_trial_invite(uid: int):
+    """
+    30 kunlik bepul sinov uchun bitta martalik invite yaratadi va haydovchiga yuboradi.
+    """
+    try:
+        granted_at = datetime.now()
+        expires_at = granted_at + timedelta(days=FREE_TRIAL_DAYS)
+        invite = await bot.create_chat_invite_link(
+            chat_id=DRIVERS_CHAT_ID,
+            name=f"trial-{uid}",
+            member_limit=1,
+            expire_date=int(expires_at.timestamp())
+        )
+        invite_link = invite.invite_link
+    except Exception as e:
+        for admin in ADMIN_IDS:
+            try:
+                await bot.send_message(admin, f"❌ Trial silka yaratilmadi (user {uid}): {e}")
+            except Exception:
+                pass
+        try:
+            await bot.send_message(uid, "❌ Kechirasiz, hozircha trial havola yaratilmayapti. Iltimos, admin bilan bog‘laning.")
+        except Exception:
+            pass
+        return
+
+    trial_members[uid] = {"expires_at": expires_at}
+
+    profile = user_profiles.setdefault(uid, {})
+    profile["trial_granted_at"] = granted_at.isoformat()
+    profile["trial_expires_at"] = expires_at.isoformat()
+    await save_users_to_disk(user_profiles)
+
+    ikb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Haydovchilar guruhiga qo‘shilish (30 kun bepul)", url=invite_link)]
+    ])
+    try:
+        dm = await bot.send_message(
+            chat_id=uid,
+            text=(
+                f"🎁 <b>30 kunlik bepul sinov</b> faollashtirildi!\n\n"
+                f"⏳ Amal qilish muddati: <b>{expires_at.strftime('%Y-%m-%d %H:%M')}</b> gacha.\n"
+                "Quyidagi tugma orqali guruhga qo‘shiling. Sinov tugaganda agar obuna bo‘lmasangiz, guruhdan chiqarib qo‘yiladi."
+            ),
+            parse_mode="HTML",
+            reply_markup=ikb,
+            disable_web_page_preview=True
+        )
+        pending_invites[uid] = {"msg_id": dm.message_id, "link": invite_link}
+    except Exception:
+        pass
+
+async def trial_watcher():
+    """
+    Har soatda trial muddati tugaganlarni (to‘lov qilmagan bo‘lsa) guruhdan chiqaradi
+    va to‘lov ma'lumotlari bilan DM yuboradi.
+    """
+    while True:
+        try:
+            now = datetime.now()
+            for uid, info in list(trial_members.items()):
+                # To'lov qilganlar kuzatuvdan chiqariladi
+                if subscriptions.get(uid, {}).get("active"):
+                    trial_members.pop(uid, None)
+                    continue
+
+                exp = info.get("expires_at")
+                if exp and now >= exp:
+                    # Guruhdan chiqarib (rejoin ruxsat) qo'yamiz
+                    try:
+                        await bot.ban_chat_member(DRIVERS_CHAT_ID, uid)
+                        await bot.unban_chat_member(DRIVERS_CHAT_ID, uid)
+                    except Exception:
+                        pass
+
+                    # To'lov ma'lumoti + narx
+                    price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
+                    pay_text = (
+                        "⛔️ <b>30 kunlik bepul sinov muddati tugadi.</b>\n\n"
+                        f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
+                        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER}</code>\n"
+                        f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
+                        "✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring.\n"
+                        "Tasdiqlangach, sizga <b>Haydovchilar guruhi</b>ga qayta qo‘shilish havolasini yuboramiz."
+                    )
+
+                    # Inline tugmalar
+                    if SUPPORTS_COPY_TEXT:
+                        ikb = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(
+                                text="📋 Karta raqamini nusxalash",
+                                copy_text=CopyTextButton(text=CARD_NUMBER)
+                            )],
+                            [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
+                        ])
+                    else:
+                        ikb = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
+                        ])
+
+                    # "Chekni yuborish" callback'i ishlashi uchun stage'ni tayyorlab qo'yamiz
+                    driver_onboarding[uid] = driver_onboarding.get(uid, {})
+                    driver_onboarding[uid]["stage"] = "wait_check"
+
+                    try:
+                        await bot.send_message(uid, pay_text, parse_mode="HTML", reply_markup=ikb)
+                    except Exception:
+                        pass
+
+                    # Trial ro'yxatidan o'chiramiz
+                    trial_members.pop(uid, None)
+
+        except Exception:
+            # watchdog yiqilmasin
+            pass
+
+        await asyncio.sleep(3600)  # 1 soatda bir tekshiradi
+
 async def after_phone_collected(uid: int, message: types.Message):
     data = driver_onboarding.get(uid, {})
     name = data.get("name", "—")
@@ -291,11 +486,43 @@ async def after_phone_collected(uid: int, message: types.Message):
     phone = data.get("phone", "—")
 
     if uid in user_profiles:
-        user_profiles[uid]["phone"] = phone
+        user_profiles[uid]["phone"] = phone if phone and phone != "—" else user_profiles[uid].get("phone")
         user_profiles[uid]["name"] = user_profiles[uid].get("name") or name
     else:
         user_profiles[uid] = {"name": name, "phone": phone}
+    # ✅ har doim saqlaymiz
+    await save_users_to_disk(user_profiles)
 
+    profile = user_profiles.get(uid, {})
+    trial_granted_at = profile.get("trial_granted_at")
+    trial_joined_at = profile.get("trial_joined_at")
+
+    # >>> Trial yoqilgan bo‘lsa — 30 kunlik havola yuboramiz
+    if FREE_TRIAL_ENABLED and not subscriptions.get(uid, {}).get("active"):
+        if not trial_granted_at:
+            try:
+                await message.answer(
+                    "🎁 Siz uchun <b>30 kunlik bepul sinov</b> ishga tushiriladi.\n"
+                    "Bir zumda havolani yuboraman...",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            await _send_trial_invite(uid)
+            driver_onboarding.pop(uid, None)
+            return
+        else:
+            dt_txt = human_dt(trial_joined_at or trial_granted_at)
+            try:
+                await message.answer(
+                    f"ℹ️ Siz {dt_txt} sanada 30 kunlik bepul sinov orqali haydovchilar guruhiga qo‘shilgansiz."
+                    " Bepul sinov faqat bir martalik, shuning uchun qayta havola yuborilmaydi.",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+    # ======== Asl to‘lov oqimi ========
     price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
     pay_text = (
         f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
@@ -306,7 +533,6 @@ async def after_phone_collected(uid: int, message: types.Message):
         f"<b>jinoyiy javobgarlik</b> qo‘llanilishi mumkin."
     )
 
-    # 1-tap copy tugmasi (mavjud bo‘lsa) + fallback
     if SUPPORTS_COPY_TEXT:
         ikb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
@@ -325,7 +551,7 @@ async def after_phone_collected(uid: int, message: types.Message):
         f"👤 <b>F.I.Sh:</b> {name}\n"
         f"🚗 <b>Avtomobil:</b> {car_make}\n"
         f"🔢 <b>Raqam:</b> {car_plate}\n"
-        f"📞 <b>Telefon:</b> {phone}",
+        f"📞 <b>Telefon:</b> {phone_display(user_profiles.get(uid, {}).get('phone', phone))}",
         parse_mode="HTML"
     )
     await message.answer(pay_text, parse_mode="HTML", reply_markup=ikb)
@@ -368,11 +594,6 @@ async def _build_check_caption(uid: int, data: dict) -> str:
     return cap
 
 async def _send_check_to_payments(uid: int, caption: str, file_id: str, as_photo: bool) -> bool:
-    """
-    Cheklar guruhiga rasm/hujjatni yuboradi, inline 'Tasdiqlash/Rad etish' tugmalari bilan.
-    Agar rasmga huquq bo‘lmasa -> document sifatida urinadi.
-    Bo‘lmasa admin(lar)ga DM orqali ogohlantiradi.
-    """
     kb = _make_payment_kb(uid)
     try:
         if as_photo:
@@ -479,6 +700,9 @@ async def _send_driver_invite_and_mark(callback: types.CallbackQuery, driver_id:
             disable_web_page_preview=True
         )
         pending_invites[driver_id] = {"msg_id": dm.message_id, "link": invite_link}
+        # >>> To'lov tasdiqlandi: obuna faollashdi (trial bo'lsa ham bekor qilamiz)
+        subscriptions[driver_id] = {"active": True}
+        trial_members.pop(driver_id, None)
     except Exception as e:
         await callback.answer("❌ Haydovchiga DM yuborilmadi (botga /start yozmagan bo‘lishi mumkin).", show_alert=True)
         return
@@ -556,7 +780,7 @@ async def cb_payment_no(callback: types.CallbackQuery):
 
     await callback.answer("Rad etildi.")
 
-# ================== ADMIN: /tasdiq <user_id> (qo‘lda variant, xohlasangiz qoldiring) ==================
+# ================== ADMIN: /tasdiq <user_id> (qo‘lda variant) ==================
 @dp.message(Command("tasdiq"))
 async def admin_confirm_payment(message: types.Message):
     admin_id = message.from_user.id
@@ -597,6 +821,8 @@ async def admin_confirm_payment(message: types.Message):
             disable_web_page_preview=True
         )
         pending_invites[driver_id] = {"msg_id": dm.message_id, "link": invite_link}
+        subscriptions[driver_id] = {"active": True}
+        trial_members.pop(driver_id, None)
         await message.reply(f"✅ Silka yuborildi: <code>{driver_id}</code>", parse_mode="HTML")
     except Exception:
         await message.reply("❌ Haydovchiga DM yuborib bo‘lmadi (botga /start yozmagan bo‘lishi mumkin).")
@@ -621,6 +847,10 @@ async def on_chat_member(update: types.ChatMemberUpdated):
                     await bot.send_message(user.id, "🎉 Guruhga muvaffaqiyatli qo‘shildingiz! Ishingizga omad.")
                 except Exception:
                     pass
+            profile = user_profiles.setdefault(user.id, {})
+            if profile.get("trial_granted_at") and not profile.get("trial_joined_at"):
+                profile["trial_joined_at"] = datetime.now().isoformat()
+                await save_users_to_disk(user_profiles)
     except Exception:
         pass
 
@@ -653,17 +883,26 @@ async def back_flow(message: types.Message):
         await message.answer("Asosiy menyu", reply_markup=order_keyboard()); return
 
     stage = d["stage"]
+
+    # Soddalashtirilgan bosqichlar:
     if stage == "vehicle":
-        await message.answer("🚚 Qanday yuk mashinasi kerak?\nQuyidagidan tanlang yoki o‘zingiz yozing:", reply_markup=vehicle_keyboard()); return
+        drafts.pop(uid, None)
+        await message.answer("Asosiy menyu", reply_markup=order_keyboard()); return
     if stage == "from":
         d["stage"] = "vehicle"
+        d["vehicle"] = None
         await message.answer("🚚 Qanday yuk mashinasi kerak?\nQuyidagidan tanlang yoki o‘zingiz yozing:", reply_markup=vehicle_keyboard()); return
     if stage == "to":
         d["stage"] = "from"
+        d["from"] = None
         await message.answer("📍 Yuk **qayerdan** olinadi?\nManzilni yozing yoki “📍 Lokatsiyani yuborish” tugmasi:", reply_markup=pickup_keyboard()); return
-    if stage in ("when_select", "when_input"):
+    if stage == "when_select":
         d["stage"] = "to"
+        d["when"] = None
         await message.answer("📦 Yuk **qayerga** yetkaziladi? Manzilni yozing:", reply_markup=keyboard_with_back_cancel([], show_back=True)); return
+    if stage == "when_input":
+        d["stage"] = "when_select"
+        await message.answer("🕒 Qaysi **vaqtga** kerak?\nTugmalardan tanlang yoki `HH:MM` yozing.", reply_markup=when_keyboard()); return
 
 # ================== BUYURTMA: LOKATSIYA ==================
 @dp.message(F.location)
@@ -684,19 +923,23 @@ async def collect_flow(message: types.Message):
     if uid not in drafts: return
     d = drafts[uid]; stage = d["stage"]; text = (message.text or "").strip()
 
+    # 1) Mashina
     if stage == "vehicle":
         d["vehicle"] = text if text else "Noma'lum"
         d["stage"] = "from"
         await message.answer("📍 Yuk **qayerdan** olinadi?\nManzilni yozing yoki “📍 Lokatsiyani yuborish”:", reply_markup=pickup_keyboard()); return
 
+    # 2) Qayerdan
     if stage == "from":
         d["from"] = text; d["stage"] = "to"
         await message.answer("📦 Yuk **qayerga** yetkaziladi? Manzilni yozing:", reply_markup=keyboard_with_back_cancel([], show_back=True)); return
 
+    # 3) Qayerga
     if stage == "to":
         d["to"] = text; d["stage"] = "when_select"
         await message.answer("🕒 Qaysi **vaqtga** kerak?\nTugmalardan tanlang yoki `HH:MM` yozing.", reply_markup=when_keyboard()); return
 
+    # 4) Vaqt tanlash
     if stage == "when_select":
         if text == HOZIR:
             d["when"] = datetime.now().strftime("%H:%M"); await finalize_and_send(message, d); return
@@ -707,6 +950,7 @@ async def collect_flow(message: types.Message):
             d["when"] = normalize_hhmm(text); await finalize_and_send(message, d); return
         await message.answer("❗️ Vaqt formati `HH:MM` bo‘lishi kerak. Yoki tugmalarni tanlang.", reply_markup=when_keyboard()); return
 
+    # 5) Vaqt qo‘lda kiritish
     if stage == "when_input":
         if is_hhmm(text):
             d["when"] = normalize_hhmm(text); await finalize_and_send(message, d); return
@@ -729,7 +973,19 @@ def phone_display(p: str) -> str:
     if not p: return "—"
     p = str(p); return p if p.startswith("+") else f"+{p}"
 
+def human_dt(dt_str: str | None) -> str:
+    if not dt_str:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(dt_str)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return dt_str
+
 def group_post_text(customer_id: int, order: dict, status_note: str | None = None) -> str:
+    """
+    Guruh posti matni (scope/region yo‘q — soddalashtirilgan).
+    """
     customer_name = user_profiles.get(customer_id, {}).get("name", "Mijoz")
     base = (
         f"📦 Yangi buyurtma!\n"
@@ -794,7 +1050,12 @@ def schedule_driver_reminders(customer_id: int):
 # ================== GURUHGA YUBORISH + MIJOZGA BEKOR TUGMASI ==================
 async def finalize_and_send(message: types.Message, d: dict):
     uid = message.from_user.id
-    order_data = {"vehicle": d["vehicle"], "from": d["from"], "to": d["to"], "when": d["when"]}
+    order_data = {
+        "vehicle": d["vehicle"],
+        "from": d["from"],
+        "to": d["to"],
+        "when": d["when"],
+    }
     ikb_group = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❗️ Qabul qilish", callback_data=f"accept_{uid}")]
     ])
@@ -840,7 +1101,8 @@ async def accept_order(callback: types.CallbackQuery):
         f"👤 Mijoz: {customer_name}\n"
         f"📞 Telefon: <a href=\"tg://user?id={customer_id}\">{phone_display(customer_phone)}</a>\n"
         f"🚚 Mashina: {order['vehicle']}\n"
-        f"➡️ Yo‘nalish:\n   • Qayerdan: {order['from']}\n   • Qayerga: {order['to']}\n"
+        f"➡️ Yo‘nalish:\n   • Qayerdan: {order['from']}\n"
+        f"   • Qayerga: {order['to']}\n"
         f"🕒 Vaqt: {order['when']}"
     )
     ikb_drv = InlineKeyboardMarkup(inline_keyboard=[
@@ -1028,11 +1290,56 @@ async def test_payments_photo_cmd(message: types.Message):
         await message.reply("✅ Rasm cheklar guruhiga yuborildi.")
     except Exception as e:
         await message.reply(f"❌ Rasm yuborilmadi: {e}")
+        
+# ================== ADMIN: FOYDALANUVCHILAR SONI ==================
+@dp.message(Command("users_count"))
+async def users_count_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    total = len(user_profiles or {})
+    with_phone = sum(1 for _, p in (user_profiles or {}).items() if p.get("phone"))
+    await message.reply(
+        f"👥 Jami foydalanuvchilar: <b>{total}</b>\n"
+        f"📞 Telefon saqlanganlar: <b>{with_phone}</b>",
+        parse_mode="HTML"
+    )
+
+# ================== ADMIN: CSV EXPORT ==================
+@dp.message(Command("export_users"))
+async def export_users_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    rows = []
+    for uid, prof in (user_profiles or {}).items():
+        rows.append([uid, prof.get("name", ""), prof.get("phone", "")])
+
+    # Fayl nomi (data/ ichida)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(DATA_DIR, f"users_{ts}.csv")
+
+    # Excel uchun utf-8-sig
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["user_id", "name", "phone"])
+        writer.writerows(rows)
+
+    try:
+        await message.answer_document(
+            document=FSInputFile(out_path),
+            caption=f"👥 Foydalanuvchilar ro‘yxati (CSV) — {len(rows)} ta"
+        )
+    except Exception as e:
+        await message.reply(f"❌ CSV yuborilmadi: {e}")
 
 # ================== POLLING ==================
 async def main():
     print("Bot ishga tushmoqda...")
     await bot.delete_webhook(drop_pending_updates=True)
+
+    # >>> Trial nazoratchisini fon rejimda ishga tushiramiz
+    asyncio.create_task(trial_watcher())
+
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":
