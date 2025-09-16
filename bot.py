@@ -118,7 +118,8 @@ BOSHQA = "⌨️ Boshqa vaqt"
 DRIVER_BTN  = "👨‍✈️ Haydovchi bo'lish"
 CONTACT_BTN = "📞 Biz bilan bog'lanish"
 
-CONTACT_PHONE = "+998503307707"
+CONTACT_PHONE = "+998 50 330 77 07"
+CONTACT_PHONE_LINK = CONTACT_PHONE.replace(" ", "")
 CONTACT_TG    = "EltiBer_admin"
 
 # ================== KLAVIATURALAR ==================
@@ -219,8 +220,8 @@ async def contact_received(message: types.Message):
 async def contact_us(message: types.Message):
     caption = (
         "<b>📞 Biz bilan bog'lanish</b>\n\n"
-        "• Telefon: <a href=\"https://t.me/EltiBer_admin\">+998503307707</a>\n"
-        "• Telegram: @EltiBer_admin"
+        f"• Telefon: <a href=\"tel:{CONTACT_PHONE_LINK}\">{CONTACT_PHONE}</a>\n"
+        f"• Telegram: @{CONTACT_TG}"
     )
     ikb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✉️ Telegramga yozish", url=f"https://t.me/{CONTACT_TG}")]
