@@ -449,17 +449,20 @@ async def trial_watcher():
 
                     # Inline tugmalar
                     if SUPPORTS_COPY_TEXT:
-                        ikb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(
-                                text="📋 Karta raqamini nusxalash",
-                                copy_text=CopyTextButton(text=CARD_NUMBER)
-                            )],
-                            [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
-                        ])
+                        copy_btn_row = [InlineKeyboardButton(
+                            text="📋 Karta raqamini nusxalash",
+                            copy_text=CopyTextButton(text=CARD_NUMBER)
+                        )]
                     else:
-                        ikb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
-                        ])
+                        copy_btn_row = [InlineKeyboardButton(
+                            text="📋 Karta raqamini nusxalash",
+                            switch_inline_query_current_chat=CARD_NUMBER
+                        )]
+
+                    ikb = InlineKeyboardMarkup(inline_keyboard=[
+                        copy_btn_row,
+                        [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
+                    ])
 
                     # "Chekni yuborish" callback'i ishlashi uchun stage'ni tayyorlab qo'yamiz
                     driver_onboarding[uid] = driver_onboarding.get(uid, {})
@@ -535,17 +538,20 @@ async def after_phone_collected(uid: int, message: types.Message):
     )
 
     if SUPPORTS_COPY_TEXT:
-        ikb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="📋 Karta raqamini nusxalash",
-                copy_text=CopyTextButton(text=CARD_NUMBER)
-            )],
-            [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
-        ])
+        copy_btn_row = [InlineKeyboardButton(
+            text="📋 Karta raqamini nusxalash",
+            copy_text=CopyTextButton(text=CARD_NUMBER)
+        )]
     else:
-        ikb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
-        ])
+        copy_btn_row = [InlineKeyboardButton(
+            text="📋 Karta raqamini nusxalash",
+            switch_inline_query_current_chat=CARD_NUMBER
+        )]
+
+    ikb = InlineKeyboardMarkup(inline_keyboard=[
+        copy_btn_row,
+        [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
+    ])
 
     await message.answer(
         "Ma’lumotlaringiz qabul qilindi ✅\n\n"
