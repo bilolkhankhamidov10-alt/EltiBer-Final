@@ -4,12 +4,6 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     FSInputFile
 )
-# CopyTextButton yangi Telegram Bot API’da bor. Aiogram versiyangizda bo‘lmasa, fallback ishlaydi.
-try:
-    from aiogram.types import CopyTextButton
-    SUPPORTS_COPY_TEXT = True
-except Exception:
-    SUPPORTS_COPY_TEXT = False
 
 from aiogram.filters import Command, CommandStart
 import asyncio
@@ -18,6 +12,7 @@ import os
 import json
 from typing import Any
 import csv
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
 # ================== SOZLAMALAR ==================
@@ -35,6 +30,13 @@ ADMIN_IDS = [6948926876]
 CARD_NUMBER = "5614682216212664"
 CARD_HOLDER = "BILOL HAMIDOV"
 SUBSCRIPTION_PRICE = 99_000
+
+def format_card_number(card: str) -> str:
+    return " ".join(card[i:i+4] for i in range(0, len(card), 4))
+
+
+CARD_NUMBER_DISPLAY = format_card_number(CARD_NUMBER)
+CARD_NUMBER_LINK = f"https://t.me/share/url?url={quote_plus(CARD_NUMBER)}&text={quote_plus(CARD_NUMBER_DISPLAY)}"
 
 bot = Bot(token=TOKEN)
 dp  = Dispatcher()
@@ -441,22 +443,13 @@ async def trial_watcher():
                     pay_text = (
                         "⛔️ <b>30 kunlik bepul sinov muddati tugadi.</b>\n\n"
                         f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
-                        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER}</code>\n"
+                        f"🧾 <b>Karta:</b> <a href=\"{CARD_NUMBER_LINK}\">{CARD_NUMBER_DISPLAY}</a>\n"
                         f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
                         "✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring.\n"
                         "Tasdiqlangach, sizga <b>Haydovchilar guruhi</b>ga qayta qo‘shilish havolasini yuboramiz."
                     )
 
-                    # Inline tugmalar
-                    if SUPPORTS_COPY_TEXT:
-                        copy_row = [[InlineKeyboardButton(
-                            text="📋 Karta raqamini nusxalash",
-                            copy_text=CopyTextButton(text=CARD_NUMBER)
-                        )]]
-                    else:
-                        copy_row = []
-
-                    rows = copy_row + [[InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]]
+                    rows = [[InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]]
                     ikb = InlineKeyboardMarkup(inline_keyboard=rows)
 
                     # "Chekni yuborish" callback'i ishlashi uchun stage'ni tayyorlab qo'yamiz
@@ -525,22 +518,14 @@ async def after_phone_collected(uid: int, message: types.Message):
     price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
     pay_text = (
         f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
-        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER}</code>\n"
+        f"🧾 <b>Karta:</b> <a href=\"{CARD_NUMBER_LINK}\">{CARD_NUMBER_DISPLAY}</a>\n"
         f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
         f"✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring (screenshot ham bo‘ladi).\n"
         f"⚠️ <b>Ogohlantirish:</b> soxtalashtirilgan chek yuborgan shaxsga "
         f"<b>jinoyiy javobgarlik</b> qo‘llanilishi mumkin."
     )
 
-    if SUPPORTS_COPY_TEXT:
-        rows = [[InlineKeyboardButton(
-            text="📋 Karta raqamini nusxalash",
-            copy_text=CopyTextButton(text=CARD_NUMBER)
-        )]]
-    else:
-        rows = []
-
-    rows.append([InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")])
+    rows = [[InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]]
     ikb = InlineKeyboardMarkup(inline_keyboard=rows)
     await message.answer(
         "Ma’lumotlaringiz qabul qilindi ✅\n\n"
