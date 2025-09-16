@@ -449,20 +449,14 @@ async def trial_watcher():
                         "Tasdiqlangach, sizga <b>Haydovchilar guruhi</b>ga qayta qo‘shilish havolasini yuboramiz."
                     )
 
+                    rows = []
                     if SUPPORTS_COPY_TEXT:
-                        rows = [
-                            [InlineKeyboardButton(
+                        rows.append([
+                            InlineKeyboardButton(
                                 text="📋 Karta raqamini nusxalash",
                                 copy_text=CopyTextButton(text=CARD_NUMBER)
-                            )]
-                        ]
-                    else:
-                        rows = [
-                            [InlineKeyboardButton(
-                                text="📋 Karta raqamini nusxalash",
-                                switch_inline_query_current_chat=CARD_NUMBER
-                            )]
-                        ]
+                            )
+                        ])
                     rows.append([InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")])
                     ikb = InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -539,20 +533,14 @@ async def after_phone_collected(uid: int, message: types.Message):
         f"<b>jinoyiy javobgarlik</b> qo‘llanilishi mumkin."
     )
 
+    rows = []
     if SUPPORTS_COPY_TEXT:
-        rows = [
-            [InlineKeyboardButton(
+        rows.append([
+            InlineKeyboardButton(
                 text="📋 Karta raqamini nusxalash",
                 copy_text=CopyTextButton(text=CARD_NUMBER)
-            )]
-        ]
-    else:
-        rows = [
-            [InlineKeyboardButton(
-                text="📋 Karta raqamini nusxalash",
-                switch_inline_query_current_chat=CARD_NUMBER
-            )]
-        ]
+            )
+        ])
     rows.append([InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")])
     ikb = InlineKeyboardMarkup(inline_keyboard=rows)
     await message.answer(
