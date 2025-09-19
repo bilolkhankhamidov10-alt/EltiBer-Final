@@ -36,6 +36,16 @@ CARD_HOLDER = "BILOL HAMIDOV"
 SUBSCRIPTION_PRICE = 99_000
 CARD_NUMBER_DISPLAY = CARD_NUMBER
 
+MAX_DRIVER_REGIONS = 7
+REGION_PRICING = {
+    1: 99_000,
+    2: 179_000,
+    3: 259_000,
+    4: 339_000,
+    5: 419_000,
+}
+MAX_REGION_PRICING = 499_000
+
 bot = Bot(token=TOKEN)
 dp  = Dispatcher()
 
@@ -139,7 +149,7 @@ def _load_regions_config() -> dict[str, dict[str, int]]:
         raise RuntimeError(
             "regions.json bo'sh. Iltimos, hech bo'lmaganda bitta hududni sozlang."
         )
-    return regions
+    return regions[:MAX_DRIVER_REGIONS]
 
 
 REGIONS = _load_regions_config()
@@ -175,6 +185,8 @@ def normalize_region_list(values) -> list[str]:
         if name and name not in seen:
             seen.add(name)
             result.append(name)
+        if len(result) >= MAX_DRIVER_REGIONS:
+            break
     return result
 
 
@@ -194,17 +206,20 @@ def set_profile_regions(uid: int, regions) -> list[str]:
     profile = user_profiles.setdefault(uid, {})
     if normalized:
         profile["regions"] = normalized
+        profile["last_region"] = normalized[-1]
     else:
         profile.pop("regions", None)
+        profile.pop("last_region", None)
     profile.pop("region", None)
     return normalized
 
 
 def add_profile_regions(uid: int, regions) -> list[str]:
-    current = set(get_profile_regions(uid))
+    current = get_profile_regions(uid)
     for region in normalize_region_list(regions):
-        current.add(region)
-    return set_profile_regions(uid, list(current))
+        if region not in current and len(current) < MAX_DRIVER_REGIONS:
+            current.append(region)
+    return set_profile_regions(uid, current)
 
 
 def _normalize_existing_regions() -> None:
@@ -215,11 +230,20 @@ def _normalize_existing_regions() -> None:
         regions = data.get("regions") or data.get("region")
         normalized = normalize_region_list(regions)
         data["regions"] = normalized
+        if normalized:
+            data["last_region"] = normalized[-1]
+        else:
+            data.pop("last_region", None)
         data.pop("region", None)
 
     for uid, data in list(trial_members.items()):
         regions = data.get("regions") or data.get("region")
-        data["regions"] = normalize_region_list(regions)
+        normalized = normalize_region_list(regions)
+        data["regions"] = normalized
+        if normalized:
+            data["last_region"] = normalized[-1]
+        else:
+            data.pop("last_region", None)
         data.pop("region", None)
 
     for uid, info in list(pending_invites.items()):
@@ -317,30 +341,37 @@ def resolve_driver_regions(driver_id: int) -> list[str]:
     if data:
         _extend(data.get("regions"))
         _extend(data.get("region"))
+        _extend(data.get("last_region"))
 
     sub = subscriptions.get(driver_id)
     if sub:
         _extend(sub.get("regions"))
         _extend(sub.get("region"))
+        _extend(sub.get("last_region"))
 
     profile = user_profiles.get(driver_id)
     if profile:
         _extend(profile.get("regions"))
         _extend(profile.get("region"))
+        _extend(profile.get("last_region"))
 
     trial = trial_members.get(driver_id)
     if trial:
         _extend(trial.get("regions"))
         _extend(trial.get("region"))
+        _extend(trial.get("last_region"))
 
     pending = pending_invites.get(driver_id)
     if pending:
-        if isinstance(pending, dict) and all(isinstance(k, str) for k in pending.keys()):
-            _extend(pending.keys())
+        if isinstance(pending, dict):
+            for key, info in pending.items():
+                _extend(key)
+                if isinstance(info, dict):
+                    _extend(info.get("region"))
         else:
             _extend(pending.get("region"))
 
-    return regions
+    return regions[:MAX_DRIVER_REGIONS]
 
 def load_users_from_disk() -> dict:
     raw = _load_json(USERS_JSON, {})
@@ -374,6 +405,18 @@ subscriptions = {}   # {driver_id: {"active": True, "regions": [...]}}
 trial_members = {}   # {driver_id: {"expires_at": datetime, "regions": [...]}}
 
 _normalize_existing_regions()
+
+
+def compute_subscription_price(region_count: int) -> int:
+    if region_count <= 0:
+        return 0
+    if region_count <= 5:
+        return REGION_PRICING.get(region_count, REGION_PRICING[5])
+    return MAX_REGION_PRICING
+
+
+def format_price(amount: int) -> str:
+    return f"{amount:,}".replace(",", " ")
 
 # ================== LABELLAR ==================
 CANCEL = "❌ Bekor qilish"
@@ -641,8 +684,15 @@ async def onboarding_or_order_text(message: types.Message):
                         reply_markup=driver_region_keyboard(include_back=False)
                     )
                     return
+                price_txt = format_price(compute_subscription_price(len(regions_list)))
                 driver_onboarding[uid]["stage"] = "name"
                 await message.answer(
+                    "✅ Tanlov yakunlandi.\n"
+                    f"📍 Hududlar: <b>{', '.join(regions_list)}</b>\n"
+                    f"💳 Obuna to‘lovi: <b>{price_txt} so‘m</b> ({len(regions_list)} hudud)\n\n"
+                    f"Maksimal {MAX_DRIVER_REGIONS} ta hudud tanlash mumkin."
+                    "\nAgar ko‘proq hududga qo‘shilmoqchi bo‘lsangiz, ushbu jarayon yakunlangach yana “Haydovchi bo‘lish” bo‘limidan o‘ting."
+                    "\n"
                     "✍️ Iltimos, <b>Ism Familiya</b>ingizni yuboring:",
                     parse_mode="HTML",
                     reply_markup=keyboard_with_back_cancel([], show_back=True)
@@ -651,7 +701,10 @@ async def onboarding_or_order_text(message: types.Message):
             if txt == REGION_CLEAR:
                 driver_onboarding[uid]["regions"] = []
                 await message.answer(
-                    "✅ Tanlov tozalandi. Yangi hududlarni tanlang.",
+                    "✅ Tanlov tozalandi.\n"
+                    "Tanlangan hududlar: <b>—</b>\n"
+                    f"💳 Jami to‘lov: <b>{format_price(0)}</b> so‘m\n"
+                    "Yangi hududlarni tanlang.",
                     reply_markup=driver_region_keyboard(include_back=False)
                 )
                 return
@@ -664,22 +717,43 @@ async def onboarding_or_order_text(message: types.Message):
                 )
                 return
 
+            if selected not in regions_list and len(regions_list) >= MAX_DRIVER_REGIONS:
+                await message.answer(
+                    f"❗️ Bir vaqtning o‘zida faqat {MAX_DRIVER_REGIONS} ta hudud tanlash mumkin."
+                    "\nHududni olib tashlash uchun tanlangan hudud ustiga yana bir marta bosing yoki “🗑 Tanlovni tozalash” tugmasidan foydalaning.",
+                    reply_markup=driver_region_keyboard(include_back=False)
+                )
+                return
+
             if selected in regions_list:
                 regions_list.remove(selected)
+                price_txt = format_price(compute_subscription_price(len(regions_list)))
                 await message.answer(
                     f"ℹ️ <b>{selected}</b> hududi tanlovdan olib tashlandi."
-                    "\nYana hudud tanlang yoki “✅ Tanlash tugadi” tugmasini bosing.",
+                    "\nTanlangan hududlar: <b>{all_regions}</b>\n"
+                    "💳 Jami to‘lov: <b>{price}</b> so‘m\n"
+                    "Yana hudud tanlang yoki “✅ Tanlash tugadi” tugmasini bosing."
+                    .format(
+                        all_regions=", ".join(regions_list) if regions_list else "—",
+                        price=price_txt,
+                    ),
                     parse_mode="HTML",
                     reply_markup=driver_region_keyboard(include_back=False)
                 )
                 return
 
             regions_list.append(selected)
+            price_txt = format_price(compute_subscription_price(len(regions_list)))
             await message.answer(
                 "✅ Hudud qo‘shildi: <b>{selected}</b>\n"
                 "Tanlangan hududlar: <b>{all_regions}</b>\n"
+                "💳 Jami to‘lov: <b>{price}</b> so‘m\n"
                 "Yana hudud tanlang yoki “✅ Tanlash tugadi” tugmasini bosing."
-                .format(selected=selected, all_regions=", ".join(regions_list)),
+                .format(
+                    selected=selected,
+                    all_regions=", ".join(regions_list),
+                    price=price_txt,
+                ),
                 parse_mode="HTML",
                 reply_markup=driver_region_keyboard(include_back=False)
             )
@@ -737,7 +811,7 @@ async def _send_trial_invites(uid: int, regions: list[str]):
 
     entry = trial_members.setdefault(uid, {"expires_at": expires_at, "regions": []})
     entry["expires_at"] = expires_at
-    existing = set(entry.get("regions") or [])
+    existing = list(entry.get("regions") or [])
 
     for region in regions:
         if region in existing:
@@ -750,9 +824,11 @@ async def _send_trial_invites(uid: int, regions: list[str]):
         )
         ok = await send_region_invite(uid, region, text)
         if ok:
-            existing.add(region)
+            existing.append(region)
 
     entry["regions"] = normalize_region_list(existing)
+    if entry["regions"]:
+        entry["last_region"] = entry["regions"][-1]
 
 async def trial_watcher():
     """
@@ -774,59 +850,57 @@ async def trial_watcher():
                     regions = get_profile_regions(uid)
 
                 if exp and now >= exp and regions:
+                    driver_state = driver_onboarding.setdefault(uid, {})
+                    driver_state["stage"] = "wait_check"
+                    driver_state["regions"] = normalize_region_list(regions)
+
                     for region in regions:
                         try:
                             chat_id = get_driver_chat_id(region)
                         except Exception:
                             continue
-
                         try:
                             await bot.ban_chat_member(chat_id, uid)
                             await bot.unban_chat_member(chat_id, uid)
                         except Exception:
                             pass
 
-                        price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
-                        pay_text = (
-                            "⛔️ <b>30 kunlik bepul sinov muddati tugadi.</b>\n\n"
-                            f"📍 <b>Hudud:</b> {region}\n"
-                            f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
-                            f"🧾 <b>Karta:</b> <code>{CARD_NUMBER_DISPLAY}</code>\n"
-                            f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
-                            "✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring.\n"
-                            "Tasdiqlangach, sizga <b>haydovchilar guruhiga</b> qayta qo‘shilish havolasini yuboramiz."
+                    price_value = compute_subscription_price(len(regions))
+                    price_txt = format_price(price_value)
+                    regions_text = ", ".join(regions)
+                    pay_text = (
+                        "⛔️ <b>30 kunlik bepul sinov muddati tugadi.</b>\n\n"
+                        f"📍 <b>Hududlar:</b> {regions_text}\n"
+                        f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> ({len(regions)} hudud)\n"
+                        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER_DISPLAY}</code>\n"
+                        f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
+                        "✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring.\n"
+                        "Tasdiqlangach, sizga <b>haydovchilar guruhiga</b> qayta qo‘shilish havolasini yuboramiz."
+                    )
+
+                    if SUPPORTS_COPY_TEXT:
+                        ikb = InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(
+                                        text="📋 Karta raqamini nusxalash",
+                                        copy_text=CopyTextButton(text=CARD_NUMBER_DISPLAY)
+                                    )
+                                ],
+                                [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")],
+                            ]
+                        )
+                    else:
+                        ikb = InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
+                            ]
                         )
 
-                        if SUPPORTS_COPY_TEXT:
-                            ikb = InlineKeyboardMarkup(
-                                inline_keyboard=[
-                                    [
-                                        InlineKeyboardButton(
-                                            text="📋 Karta raqamini nusxalash",
-                                            copy_text=CopyTextButton(text=CARD_NUMBER_DISPLAY)
-                                        )
-                                    ],
-                                    [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")],
-                                ]
-                            )
-                        else:
-                            ikb = InlineKeyboardMarkup(
-                                inline_keyboard=[
-                                    [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
-                                ]
-                            )
-
-                        driver_state = driver_onboarding.setdefault(uid, {})
-                        driver_state["stage"] = "wait_check"
-                        regions_state = normalize_region_list(driver_state.get("regions"))
-                        if region not in regions_state:
-                            regions_state.append(region)
-                        driver_state["regions"] = regions_state
-
-                        try:
-                            await bot.send_message(uid, pay_text, parse_mode="HTML", reply_markup=ikb)
-                        except Exception:
-                            pass
+                    try:
+                        await bot.send_message(uid, pay_text, parse_mode="HTML", reply_markup=ikb)
+                    except Exception:
+                        pass
 
                     trial_members.pop(uid, None)
 
@@ -910,7 +984,10 @@ async def after_phone_collected(uid: int, message: types.Message):
                 successful.append(region)
         if active_regions:
             sub_entry["active"] = True
-            sub_entry["regions"] = normalize_region_list(active_regions)
+            normalized_active = normalize_region_list(active_regions)
+            sub_entry["regions"] = normalized_active
+            if normalized_active:
+                sub_entry["last_region"] = normalized_active[-1]
         subscriptions[uid] = sub_entry
         if new_regions:
             if successful:
@@ -930,9 +1007,10 @@ async def after_phone_collected(uid: int, message: types.Message):
             driver_onboarding.pop(uid, None)
             return
 
-    price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
+    price_value = compute_subscription_price(len(regions))
+    price_txt = format_price(price_value)
     pay_text = (
-        f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
+        f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> ({len(regions)} hudud)\n"
         f"🧾 <b>Karta:</b> <code>{CARD_NUMBER_DISPLAY}</code>\n"
         f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
         "✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring (screenshot ham bo‘ladi).\n"
@@ -1004,6 +1082,8 @@ async def _build_check_caption(uid: int, data: dict) -> str:
     else:
         data["regions"] = region_list
     region_text = ", ".join(region_list)
+    price_value = compute_subscription_price(len([r for r in region_list if r != "—"]))
+    price_txt = format_price(price_value)
     cap = (
         "🧾 <b>Yangi obuna to‘lovi (haydovchi)</b>\n"
         f"👤 <b>F.I.Sh:</b> {name}\n"
@@ -1012,7 +1092,7 @@ async def _build_check_caption(uid: int, data: dict) -> str:
         f"📞 <b>Telefon:</b> {phone}\n"
         f"📍 <b>Hudud(lar):</b> {region_text}\n"
         f"🔗 <b>Profil:</b> <a href=\"tg://user?id={uid}\">{uid}</a>\n\n"
-        f"💳 <b>Miqdor:</b> {SUBSCRIPTION_PRICE:,} so‘m\n"
+        f"💳 <b>Miqdor:</b> {price_txt} so‘m\n"
         "⚠️ <i>Ogohlantirish: soxtalashtirilgan chek yuborgan shaxsga nisbatan "
         "jinoyiy javobgarlik qo‘llanilishi mumkin.</i>"
     ).replace(",", " ")
@@ -1096,7 +1176,7 @@ async def receive_check_document(message: types.Message):
 
 # ================== ADMIN: Tasdiqlash/Rad etish tugmalari callbacklari ==================
 async def _send_driver_invite_and_mark(callback: types.CallbackQuery, driver_id: int):
-    regions = resolve_driver_regions(driver_id)
+    regions = normalize_region_list(resolve_driver_regions(driver_id))
     if not regions:
         await callback.answer(
             "Haydovchining hududlari aniqlanmadi. Iltimos, hududlarni qayta tanlang.",
@@ -1120,16 +1200,21 @@ async def _send_driver_invite_and_mark(callback: types.CallbackQuery, driver_id:
         return
 
     normalized_regions = normalize_region_list(regions)
-    subscriptions[driver_id] = {"active": True, "regions": normalized_regions}
+    subscription_entry = {"active": True, "regions": normalized_regions}
+    if normalized_regions:
+        subscription_entry["last_region"] = normalized_regions[-1]
+    subscriptions[driver_id] = subscription_entry
     trial_members.pop(driver_id, None)
 
     # Cheklar guruhidagi xabarni 'Tasdiqlandi' deb yangilash va tugmalarni o‘chirish
     try:
         orig_cap = callback.message.caption or ""
         admin_name = callback.from_user.username or callback.from_user.full_name
+        price_txt = format_price(compute_subscription_price(len(normalized_regions)))
         new_cap = (
             f"{orig_cap}\n\n✅ <b>Tasdiqlandi</b> — {admin_name} • {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             f"\n📍 Hududlar: {', '.join(normalized_regions)}"
+            f"\n💳 To‘lov: {price_txt} so‘m"
         )
         await bot.edit_message_caption(
             chat_id=callback.message.chat.id,
@@ -1229,10 +1314,18 @@ async def admin_confirm_payment(message: types.Message):
         sent_any = sent_any or ok
 
     if sent_any:
-        subscriptions[driver_id] = {"active": True, "regions": normalize_region_list(regions)}
+        normalized = normalize_region_list(regions)
+        sub_entry = {"active": True, "regions": normalized}
+        if normalized:
+            sub_entry["last_region"] = normalized[-1]
+        subscriptions[driver_id] = sub_entry
         trial_members.pop(driver_id, None)
         await message.reply(
-            "✅ Silka(l)ar yuborildi: " + ", ".join(normalize_region_list(regions)),
+            "✅ Silka(l)ar yuborildi: {regions}\n"
+            "💳 To‘lov: {price} so‘m".format(
+                regions=", ".join(normalized),
+                price=format_price(compute_subscription_price(len(normalized))),
+            ),
             parse_mode="HTML",
         )
     else:
@@ -1618,7 +1711,12 @@ async def finalize_and_send(message_or_uid, d: dict):
         message = None
         uid = int(message_or_uid)
 
-    region = d.get("region") or user_profiles.get(uid, {}).get("region")
+    profile = user_profiles.get(uid, {})
+    region = d.get("region") or profile.get("last_region")
+    if not region:
+        profile_regions = get_profile_regions(uid)
+        if profile_regions:
+            region = profile_regions[-1]
     if not region:
         drafts[uid] = d
         prompt = "📍 Iltimos, hududni tanlang."
