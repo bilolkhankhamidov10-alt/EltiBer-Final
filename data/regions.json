@@ -1,0 +1,20 @@
+[
+  {"name": "Farg'ona sh.", "order_chat_id": -4891027028, "driver_chat_id": -4891027028},
+  {"name": "Farg'ona t.", "order_chat_id": -4943003049, "driver_chat_id": -4943003049},
+  {"name": "Qo'qon", "order_chat_id": -4845272774, "driver_chat_id": -4845272774},
+  {"name": "Marg'ilon", "order_chat_id": -4794414257, "driver_chat_id": -4794414257},
+  {"name": "Rishton", "order_chat_id": -4891765986, "driver_chat_id": -4891765986},
+  {"name": "Quva", "order_chat_id": -4692628039, "driver_chat_id": -4692628039},
+  {"name": "Beshariq", "order_chat_id": -4832155356, "driver_chat_id": -4832155356},
+  {"name": "Buvayda", "order_chat_id": -4972307771, "driver_chat_id": -4972307771},
+  {"name": "Dang'ara", "order_chat_id": -4981210544, "driver_chat_id": -4981210544},
+  {"name": "Furqat", "order_chat_id": -4841018991, "driver_chat_id": -4841018991},
+  {"name": "Uchkuprik", "order_chat_id": -4603569306, "driver_chat_id": -4603569306},
+  {"name": "Oltiariq", "order_chat_id": -4841335876, "driver_chat_id": -4841335876},
+  {"name": "Toshloq", "order_chat_id": -4940055849, "driver_chat_id": -4940055849},
+  {"name": "Bog'dod", "order_chat_id": -4938313755, "driver_chat_id": -4938313755},
+  {"name": "Yozyavon", "order_chat_id": -4860632150, "driver_chat_id": -4860632150},
+  {"name": "O'zbekiston t.", "order_chat_id": -4846790605, "driver_chat_id": -4846790605},
+  {"name": "So'x", "order_chat_id": -4534445953, "driver_chat_id": -4534445953},
+  {"name": "Qo'shtepa", "order_chat_id": -4919982924, "driver_chat_id": -4919982924}
+]

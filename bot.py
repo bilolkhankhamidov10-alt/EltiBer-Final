@@ -26,7 +26,6 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set")
-DRIVERS_CHAT_ID  = -1002978372872         # Haydovchilar guruhi ID (buyurtmalar)
 RATINGS_CHAT_ID  = -4861064259         # 📊 Baholar log guruhi
 PAYMENTS_CHAT_ID = -4925556700         # 💳 Cheklar guruhi
 
@@ -50,6 +49,7 @@ CONTACT_IMAGE_URL  = ""   # xohlasa zahira URL
 # ======= PERSISTENCE (user_profiles -> JSON) =======
 DATA_DIR = os.path.join(BASE_DIR, "data")
 USERS_JSON = os.path.join(DATA_DIR, "users.json")
+REGIONS_JSON = os.path.join(DATA_DIR, "regions.json")
 STORE_LOCK = asyncio.Lock()
 
 def _ensure_data_dir():
@@ -77,6 +77,125 @@ async def _save_json(path: str, data: Any):
             os.remove(tmp)
         except Exception:
             pass
+
+
+def _ensure_regions_template() -> None:
+    if os.path.exists(REGIONS_JSON):
+        return
+    _ensure_data_dir()
+    sample = [
+        {
+            "name": f"Hudud {idx}",
+            "order_chat_id": 0,
+            "driver_chat_id": 0,
+        }
+        for idx in range(1, 19)
+    ]
+    try:
+        with open(REGIONS_JSON, "w", encoding="utf-8") as f:
+            json.dump(sample, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _load_regions_config() -> dict[str, dict[str, int]]:
+    data = _load_json(REGIONS_JSON, None)
+    if not data:
+        _ensure_regions_template()
+        raise RuntimeError(
+            f"regions.json fayli topilmadi yoki bo'sh. Iltimos, {REGIONS_JSON} ichida hudud nomlari va guruh IDlarini kiriting."
+        )
+
+    regions: dict[str, dict[str, int]] = {}
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        name = (entry.get("name") or "").strip()
+        if not name:
+            continue
+
+        def _as_int(value, fallback):
+            try:
+                return int(value)
+            except Exception:
+                return fallback
+
+        order_chat = _as_int(entry.get("order_chat_id"), 0)
+        driver_chat = _as_int(entry.get("driver_chat_id"), 0)
+        if order_chat == 0:
+            raise RuntimeError(
+                f"regions.json: '{name}' uchun order_chat_id to'ldirilmagan. {REGIONS_JSON} faylini yangilang."
+            )
+        if driver_chat == 0:
+            driver_chat = order_chat
+
+        regions[name] = {
+            "order_chat_id": order_chat,
+            "driver_chat_id": driver_chat,
+        }
+
+    if not regions:
+        raise RuntimeError(
+            "regions.json bo'sh. Iltimos, hech bo'lmaganda bitta hududni sozlang."
+        )
+    return regions
+
+
+REGIONS = _load_regions_config()
+REGION_NAMES = list(REGIONS.keys())
+ORDER_CHAT_IDS = {name: cfg["order_chat_id"] for name, cfg in REGIONS.items()}
+DRIVER_CHAT_IDS = {
+    name: (cfg.get("driver_chat_id") or cfg["order_chat_id"])
+    for name, cfg in REGIONS.items()
+}
+DRIVER_CHAT_ID_SET = set(DRIVER_CHAT_IDS.values())
+DRIVER_CHAT_ID_TO_REGION = {chat_id: name for name, chat_id in DRIVER_CHAT_IDS.items()}
+
+
+def resolve_region_name(value: str | None) -> str | None:
+    if not value:
+        return None
+    needle = value.strip().lower()
+    for name in REGION_NAMES:
+        if needle == name.lower():
+            return name
+    return None
+
+
+def get_order_chat_id(region: str) -> int:
+    if region not in ORDER_CHAT_IDS:
+        raise RuntimeError(f"Noma'lum hudud: {region}")
+    return ORDER_CHAT_IDS[region]
+
+
+def get_driver_chat_id(region: str) -> int:
+    if region not in DRIVER_CHAT_IDS:
+        raise RuntimeError(f"Noma'lum hudud: {region}")
+    return DRIVER_CHAT_IDS[region]
+
+
+def resolve_driver_region(driver_id: int) -> str | None:
+    data = driver_onboarding.get(driver_id)
+    if data and data.get("region"):
+        return data["region"]
+
+    sub = subscriptions.get(driver_id)
+    if sub and sub.get("region"):
+        return sub["region"]
+
+    profile = user_profiles.get(driver_id)
+    if profile and profile.get("region"):
+        return profile["region"]
+
+    trial = trial_members.get(driver_id)
+    if trial and trial.get("region"):
+        return trial["region"]
+
+    pending = pending_invites.get(driver_id)
+    if pending and pending.get("region"):
+        return pending["region"]
+
+    return None
 
 def load_users_from_disk() -> dict:
     raw = _load_json(USERS_JSON, {})
@@ -133,6 +252,10 @@ def keyboard_with_back_cancel(options, per_row=3, show_back=True):
     tail.append(KeyboardButton(text=CANCEL))
     rows.append(tail)
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def region_keyboard(show_back: bool = False) -> ReplyKeyboardMarkup:
+    return keyboard_with_back_cancel(REGION_NAMES, per_row=3, show_back=show_back)
 
 def vehicle_keyboard():
     VEHICLES = ["🛻 Labo", "🚚 Labodan Kattaroq"]
@@ -259,11 +382,18 @@ async def prompt_order_flow(message: types.Message):
         await message.answer("Iltimos, telefon raqamingizni yuboring 📞", reply_markup=contact_keyboard())
         return
 
-    # Soddalashtirilgan oqim: to‘g‘ridan-to‘g‘ri
-    drafts[uid] = {"stage": "vehicle", "vehicle": None, "from": None, "to": None, "when": None}
+    drafts[uid] = {
+        "stage": "region",
+        "region": None,
+        "chat_id": None,
+        "vehicle": None,
+        "from": None,
+        "to": None,
+        "when": None,
+    }
     await message.answer(
-        "🚚 Qanday yuk mashinasi kerak?\nQuyidagidan tanlang yoki o‘zingiz yozing:",
-        reply_markup=vehicle_keyboard()
+        "📍 Qaysi hudud uchun buyurtma berasiz?",
+        reply_markup=region_keyboard(show_back=False)
     )
 
 @dp.message(F.text == CANCEL)
@@ -308,8 +438,18 @@ async def haydovchi_bolish(message: types.Message):
 @dp.callback_query(F.data == "driver_agree")
 async def driver_agree_cb(callback: types.CallbackQuery):
     uid = callback.from_user.id
-    driver_onboarding[uid] = {"stage": "name", "name": None, "car_make": None, "car_plate": None, "phone": None}
-    await callback.message.answer("✍️ Iltimos, <b>Ism Familiya</b>ingizni yuboring:", parse_mode="HTML", reply_markup=keyboard_with_back_cancel([], show_back=True))
+    driver_onboarding[uid] = {
+        "stage": "region",
+        "region": None,
+        "name": None,
+        "car_make": None,
+        "car_plate": None,
+        "phone": None,
+    }
+    await callback.message.answer(
+        "📍 Qaysi hudud uchun haydovchi bo‘lasiz?",
+        reply_markup=region_keyboard(show_back=False)
+    )
     await callback.answer()
 
 # ================== ONBOARDING MATN KOLLEKTORI ==================
@@ -324,6 +464,23 @@ async def onboarding_or_order_text(message: types.Message):
 
     if uid in driver_onboarding:
         st = driver_onboarding[uid].get("stage")
+
+        if st == "region":
+            selected = resolve_region_name(txt)
+            if not selected:
+                await message.answer(
+                    "❗️ Iltimos, hududni tugmalardan tanlang.",
+                    reply_markup=region_keyboard(show_back=True)
+                )
+                return
+            driver_onboarding[uid]["region"] = selected
+            driver_onboarding[uid]["stage"] = "name"
+            await message.answer(
+                "✍️ Iltimos, <b>Ism Familiya</b>ingizni yuboring:",
+                parse_mode="HTML",
+                reply_markup=keyboard_with_back_cancel([], show_back=True)
+            )
+            return
 
         if st == "name":
             driver_onboarding[uid]["name"] = txt
@@ -361,15 +518,17 @@ async def onboarding_or_order_text(message: types.Message):
     await collect_flow(message)
 
 # ================== YORDAMCHI (trial) — QO'SHIMCHA ==================
-async def _send_trial_invite(uid: int):
+async def _send_trial_invite(uid: int, region: str):
     """
     30 kunlik bepul sinov uchun bitta martalik invite yaratadi va haydovchiga yuboradi.
     """
+    driver_chat_id = get_driver_chat_id(region)
+
     try:
         granted_at = datetime.now()
         expires_at = granted_at + timedelta(days=FREE_TRIAL_DAYS)
         invite = await bot.create_chat_invite_link(
-            chat_id=DRIVERS_CHAT_ID,
+            chat_id=driver_chat_id,
             name=f"trial-{uid}",
             member_limit=1,
             expire_date=int(expires_at.timestamp())
@@ -387,11 +546,12 @@ async def _send_trial_invite(uid: int):
             pass
         return
 
-    trial_members[uid] = {"expires_at": expires_at}
+    trial_members[uid] = {"expires_at": expires_at, "region": region}
 
     profile = user_profiles.setdefault(uid, {})
     profile["trial_granted_at"] = granted_at.isoformat()
     profile["trial_expires_at"] = expires_at.isoformat()
+    profile.setdefault("region", region)
     await save_users_to_disk(user_profiles)
 
     ikb = InlineKeyboardMarkup(inline_keyboard=[
@@ -402,6 +562,7 @@ async def _send_trial_invite(uid: int):
             chat_id=uid,
             text=(
                 f"🎁 <b>30 kunlik bepul sinov</b> faollashtirildi!\n\n"
+                f"📍 Hudud: {region}\n"
                 f"⏳ Amal qilish muddati: <b>{expires_at.strftime('%Y-%m-%d %H:%M')}</b> gacha.\n"
                 "Quyidagi tugma orqali guruhga qo‘shiling. Sinov tugaganda agar obuna bo‘lmasangiz, guruhdan chiqarib qo‘yiladi."
             ),
@@ -409,7 +570,12 @@ async def _send_trial_invite(uid: int):
             reply_markup=ikb,
             disable_web_page_preview=True
         )
-        pending_invites[uid] = {"msg_id": dm.message_id, "link": invite_link}
+        pending_invites[uid] = {
+            "msg_id": dm.message_id,
+            "link": invite_link,
+            "region": region,
+            "chat_id": driver_chat_id,
+        }
     except Exception:
         pass
 
@@ -428,49 +594,60 @@ async def trial_watcher():
                     continue
 
                 exp = info.get("expires_at")
+                region = info.get("region") or user_profiles.get(uid, {}).get("region")
+                if not region:
+                    continue
+                try:
+                    chat_id = get_driver_chat_id(region)
+                except Exception:
+                    continue
+
                 if exp and now >= exp:
-                    # Guruhdan chiqarib (rejoin ruxsat) qo'yamiz
                     try:
-                        await bot.ban_chat_member(DRIVERS_CHAT_ID, uid)
-                        await bot.unban_chat_member(DRIVERS_CHAT_ID, uid)
+                        await bot.ban_chat_member(chat_id, uid)
+                        await bot.unban_chat_member(chat_id, uid)
                     except Exception:
                         pass
 
-                    # To'lov ma'lumoti + narx
                     price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
                     pay_text = (
                         "⛔️ <b>30 kunlik bepul sinov muddati tugadi.</b>\n\n"
+                        f"📍 <b>Hudud:</b> {region}\n"
                         f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
-                        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER}</code>\n"
+                        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER_DISPLAY}</code>\n"
                         f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
                         "✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring.\n"
-                        "Tasdiqlangach, sizga <b>Haydovchilar guruhi</b>ga qayta qo‘shilish havolasini yuboramiz."
+                        "Tasdiqlangach, sizga <b>haydovchilar guruhiga</b> qayta qo‘shilish havolasini yuboramiz."
                     )
 
-                    # Inline tugmalar
                     if SUPPORTS_COPY_TEXT:
-                        ikb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(
-                                text="📋 Karta raqamini nusxalash",
-                                copy_text=CopyTextButton(text=CARD_NUMBER)
-                            )],
-                            [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
-                        ])
+                        ikb = InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(
+                                        text="📋 Karta raqamini nusxalash",
+                                        copy_text=CopyTextButton(text=CARD_NUMBER_DISPLAY)
+                                    )
+                                ],
+                                [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")],
+                            ]
+                        )
                     else:
-                        ikb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
-                        ])
+                        ikb = InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
+                            ]
+                        )
 
-                    # "Chekni yuborish" callback'i ishlashi uchun stage'ni tayyorlab qo'yamiz
                     driver_onboarding[uid] = driver_onboarding.get(uid, {})
                     driver_onboarding[uid]["stage"] = "wait_check"
+                    driver_onboarding[uid]["region"] = region
 
                     try:
                         await bot.send_message(uid, pay_text, parse_mode="HTML", reply_markup=ikb)
                     except Exception:
                         pass
 
-                    # Trial ro'yxatidan o'chiramiz
                     trial_members.pop(uid, None)
 
         except Exception:
@@ -485,12 +662,22 @@ async def after_phone_collected(uid: int, message: types.Message):
     car_make = data.get("car_make", "—")
     car_plate = data.get("car_plate", "—")
     phone = data.get("phone", "—")
+    region = data.get("region") or user_profiles.get(uid, {}).get("region")
+
+    if not region:
+        driver_onboarding.setdefault(uid, {})["stage"] = "region"
+        await message.answer(
+            "📍 Iltimos, hududni tanlang.",
+            reply_markup=region_keyboard(show_back=True)
+        )
+        return
 
     if uid in user_profiles:
         user_profiles[uid]["phone"] = phone if phone and phone != "—" else user_profiles[uid].get("phone")
         user_profiles[uid]["name"] = user_profiles[uid].get("name") or name
+        user_profiles[uid]["region"] = region
     else:
-        user_profiles[uid] = {"name": name, "phone": phone}
+        user_profiles[uid] = {"name": name, "phone": phone, "region": region}
     # ✅ har doim saqlaymiz
     await save_users_to_disk(user_profiles)
 
@@ -509,7 +696,7 @@ async def after_phone_collected(uid: int, message: types.Message):
                 )
             except Exception:
                 pass
-            await _send_trial_invite(uid)
+            await _send_trial_invite(uid, region)
             driver_onboarding.pop(uid, None)
             return
         else:
@@ -527,36 +714,43 @@ async def after_phone_collected(uid: int, message: types.Message):
     price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
     pay_text = (
         f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
-        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER}</code>\n"
+        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER_DISPLAY}</code>\n"
         f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
-        f"✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring (screenshot ham bo‘ladi).\n"
-        f"⚠️ <b>Ogohlantirish:</b> soxtalashtirilgan chek yuborgan shaxsga "
-        f"<b>jinoyiy javobgarlik</b> qo‘llanilishi mumkin."
+        "✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring (screenshot ham bo‘ladi).\n"
+        "⚠️ <b>Ogohlantirish:</b> soxtalashtirilgan chek yuborgan shaxsga <b>jinoyiy javobgarlik</b> qo‘llanilishi mumkin."
     )
 
     if SUPPORTS_COPY_TEXT:
-        ikb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="📋 Karta raqamini nusxalash",
-                copy_text=CopyTextButton(text=CARD_NUMBER)
-            )],
-            [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
-        ])
+        ikb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📋 Karta raqamini nusxalash",
+                        copy_text=CopyTextButton(text=CARD_NUMBER_DISPLAY)
+                    )
+                ],
+                [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")],
+            ]
+        )
     else:
-        ikb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
-        ])
+        ikb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
+            ]
+        )
 
     await message.answer(
         "Ma’lumotlaringiz qabul qilindi ✅\n\n"
         f"👤 <b>F.I.Sh:</b> {name}\n"
         f"🚗 <b>Avtomobil:</b> {car_make}\n"
         f"🔢 <b>Raqam:</b> {car_plate}\n"
-        f"📞 <b>Telefon:</b> {phone_display(user_profiles.get(uid, {}).get('phone', phone))}",
+        f"📞 <b>Telefon:</b> {phone_display(user_profiles.get(uid, {}).get('phone', phone))}\n"
+        f"📍 <b>Hudud:</b> {region}",
         parse_mode="HTML"
     )
     await message.answer(pay_text, parse_mode="HTML", reply_markup=ikb)
     driver_onboarding[uid]["stage"] = "wait_check"
+    driver_onboarding[uid]["region"] = region
 
 @dp.callback_query(F.data == "send_check")
 async def send_check_cb(callback: types.CallbackQuery):
@@ -581,12 +775,15 @@ async def _build_check_caption(uid: int, data: dict) -> str:
     car_make  = data.get("car_make", "—")
     car_plate = data.get("car_plate", "—")
     phone     = data.get("phone", "—")
+    region    = data.get("region") or resolve_driver_region(uid) or "—"
+    data["region"] = region
     cap = (
         "🧾 <b>Yangi obuna to‘lovi (haydovchi)</b>\n"
         f"👤 <b>F.I.Sh:</b> {name}\n"
         f"🚗 <b>Avtomobil:</b> {car_make}\n"
         f"🔢 <b>Raqam:</b> {car_plate}\n"
         f"📞 <b>Telefon:</b> {phone}\n"
+        f"📍 <b>Hudud:</b> {region}\n"
         f"🔗 <b>Profil:</b> <a href=\"tg://user?id={uid}\">{uid}</a>\n\n"
         f"💳 <b>Miqdor:</b> {SUBSCRIPTION_PRICE:,} so‘m\n"
         "⚠️ <i>Ogohlantirish: soxtalashtirilgan chek yuborgan shaxsga nisbatan "
@@ -672,10 +869,19 @@ async def receive_check_document(message: types.Message):
 
 # ================== ADMIN: Tasdiqlash/Rad etish tugmalari callbacklari ==================
 async def _send_driver_invite_and_mark(callback: types.CallbackQuery, driver_id: int):
-    # 1-martalik invite yaratish
+    region = resolve_driver_region(driver_id)
+    if not region:
+        await callback.answer(
+            "Haydovchining hududi aniqlanmadi. Iltimos, hududni qayta tanlang.",
+            show_alert=True
+        )
+        return
+
+    chat_id = get_driver_chat_id(region)
+
     try:
         invite = await bot.create_chat_invite_link(
-            chat_id=DRIVERS_CHAT_ID,
+            chat_id=chat_id,
             name=f"driver-{driver_id}",
             member_limit=1
         )
@@ -693,16 +899,21 @@ async def _send_driver_invite_and_mark(callback: types.CallbackQuery, driver_id:
             chat_id=driver_id,
             text=(
                 "✅ <b>To‘lov tasdiqlandi.</b>\n\n"
-                "Quyidagi tugma orqali <b>Haydovchilar guruhiga</b> qo‘shiling. "
+                f"Quyidagi tugma orqali <b>{region}</b> haydovchilar guruhiga qo‘shiling. "
                 "Guruhga qo‘shilgandan so‘ng bu xabar avtomatik o‘chiriladi."
             ),
             parse_mode="HTML",
             reply_markup=ikb,
             disable_web_page_preview=True
         )
-        pending_invites[driver_id] = {"msg_id": dm.message_id, "link": invite_link}
+        pending_invites[driver_id] = {
+            "msg_id": dm.message_id,
+            "link": invite_link,
+            "region": region,
+            "chat_id": chat_id,
+        }
         # >>> To'lov tasdiqlandi: obuna faollashdi (trial bo'lsa ham bekor qilamiz)
-        subscriptions[driver_id] = {"active": True}
+        subscriptions[driver_id] = {"active": True, "region": region}
         trial_members.pop(driver_id, None)
     except Exception as e:
         await callback.answer("❌ Haydovchiga DM yuborilmadi (botga /start yozmagan bo‘lishi mumkin).", show_alert=True)
@@ -795,9 +1006,16 @@ async def admin_confirm_payment(message: types.Message):
 
     driver_id = int(parts[1])
 
+    region = resolve_driver_region(driver_id)
+    if not region:
+        await message.reply("❌ Haydovchining hududi aniqlanmadi. Avval haydovchi hududni tanlashi kerak.")
+        return
+
+    chat_id = get_driver_chat_id(region)
+
     try:
         invite = await bot.create_chat_invite_link(
-            chat_id=DRIVERS_CHAT_ID,
+            chat_id=chat_id,
             name=f"driver-{driver_id}",
             member_limit=1
         )
@@ -814,15 +1032,20 @@ async def admin_confirm_payment(message: types.Message):
             chat_id=driver_id,
             text=(
                 "✅ <b>To‘lov tasdiqlandi.</b>\n\n"
-                "Quyidagi tugma orqali <b>Haydovchilar guruhiga</b> qo‘shiling. "
+                f"Quyidagi tugma orqali <b>{region}</b> haydovchilar guruhiga qo‘shiling. "
                 "Guruhga qo‘shilgandan so‘ng bu xabar avtomatik o‘chiriladi."
             ),
             parse_mode="HTML",
             reply_markup=ikb,
             disable_web_page_preview=True
         )
-        pending_invites[driver_id] = {"msg_id": dm.message_id, "link": invite_link}
-        subscriptions[driver_id] = {"active": True}
+        pending_invites[driver_id] = {
+            "msg_id": dm.message_id,
+            "link": invite_link,
+            "region": region,
+            "chat_id": chat_id,
+        }
+        subscriptions[driver_id] = {"active": True, "region": region}
         trial_members.pop(driver_id, None)
         await message.reply(f"✅ Silka yuborildi: <code>{driver_id}</code>", parse_mode="HTML")
     except Exception:
@@ -832,7 +1055,8 @@ async def admin_confirm_payment(message: types.Message):
 @dp.chat_member()
 async def on_chat_member(update: types.ChatMemberUpdated):
     try:
-        if update.chat.id != DRIVERS_CHAT_ID:
+        chat_id = update.chat.id
+        if chat_id not in DRIVER_CHAT_ID_SET:
             return
         old_status = update.old_chat_member.status
         new_status = update.new_chat_member.status
@@ -848,7 +1072,13 @@ async def on_chat_member(update: types.ChatMemberUpdated):
                     await bot.send_message(user.id, "🎉 Guruhga muvaffaqiyatli qo‘shildingiz! Ishingizga omad.")
                 except Exception:
                     pass
+            region = (pend or {}).get("region") or DRIVER_CHAT_ID_TO_REGION.get(chat_id)
             profile = user_profiles.setdefault(user.id, {})
+            if region:
+                profile.setdefault("region", region)
+                subscriptions.setdefault(user.id, {}).setdefault("region", region)
+                if user.id in trial_members:
+                    trial_members[user.id].setdefault("region", region)
             if profile.get("trial_granted_at") and not profile.get("trial_joined_at"):
                 profile["trial_joined_at"] = datetime.now().isoformat()
                 await save_users_to_disk(user_profiles)
@@ -863,9 +1093,17 @@ async def back_flow(message: types.Message):
     # Onboarding ortga
     if uid in driver_onboarding:
         st = driver_onboarding[uid].get("stage")
-        if st == "name":
+        if st == "region":
             driver_onboarding.pop(uid, None)
             await message.answer("Asosiy menyu", reply_markup=order_keyboard()); return
+        if st == "name":
+            driver_onboarding[uid]["stage"] = "region"
+            driver_onboarding[uid]["name"] = None
+            driver_onboarding[uid]["region"] = None
+            await message.answer(
+                "📍 Qaysi hudud uchun haydovchi bo‘lasiz?",
+                reply_markup=region_keyboard(show_back=True)
+            ); return
         if st == "car_make":
             driver_onboarding[uid]["stage"] = "name"
             await message.answer("✍️ Iltimos, <b>Ism Familiya</b>ingizni yuboring:", parse_mode="HTML", reply_markup=keyboard_with_back_cancel([], show_back=True)); return
@@ -886,7 +1124,19 @@ async def back_flow(message: types.Message):
     stage = d["stage"]
 
     # Soddalashtirilgan bosqichlar:
+    if stage == "region":
+        drafts.pop(uid, None)
+        await message.answer("Asosiy menyu", reply_markup=order_keyboard()); return
     if stage == "vehicle":
+        if d.get("region"):
+            d["stage"] = "region"
+            d["vehicle"] = None
+            d["region"] = None
+            d["chat_id"] = None
+            await message.answer(
+                "📍 Qaysi hudud uchun buyurtma berasiz?",
+                reply_markup=region_keyboard(show_back=False)
+            ); return
         drafts.pop(uid, None)
         await message.answer("Asosiy menyu", reply_markup=order_keyboard()); return
     if stage == "from":
@@ -921,41 +1171,90 @@ async def location_received(message: types.Message):
 # ================== BUYURTMA KOLLEKTOR ==================
 async def collect_flow(message: types.Message):
     uid = message.from_user.id
-    if uid not in drafts: return
-    d = drafts[uid]; stage = d["stage"]; text = (message.text or "").strip()
+    if uid not in drafts:
+        return
+    d = drafts[uid]
+    stage = d["stage"]
+    text = (message.text or "").strip()
 
-    # 1) Mashina
+    if stage == "region":
+        selected = resolve_region_name(text)
+        if not selected:
+            await message.answer(
+                "❗️ Iltimos, hududni tugmalar yordamida tanlang.",
+                reply_markup=region_keyboard(show_back=False)
+            )
+            return
+        d["region"] = selected
+        d["chat_id"] = get_order_chat_id(selected)
+        user_profiles.setdefault(uid, {})["region"] = selected
+        await save_users_to_disk(user_profiles)
+        d["stage"] = "vehicle"
+        await message.answer(
+            "🚚 Qanday yuk mashinasi kerak?\nQuyidagidan tanlang yoki o‘zingiz yozing:",
+            reply_markup=vehicle_keyboard()
+        )
+        return
+
     if stage == "vehicle":
         d["vehicle"] = text if text else "Noma'lum"
         d["stage"] = "from"
-        await message.answer("📍 Yuk **qayerdan** olinadi?\nManzilni yozing yoki “📍 Lokatsiyani yuborish”:", reply_markup=pickup_keyboard()); return
+        await message.answer(
+            "📍 Yuk **qayerdan** olinadi?\nManzilni yozing yoki “📍 Lokatsiyani yuborish”:",
+            reply_markup=pickup_keyboard()
+        )
+        return
 
-    # 2) Qayerdan
     if stage == "from":
-        d["from"] = text; d["stage"] = "to"
-        await message.answer("📦 Yuk **qayerga** yetkaziladi? Manzilni yozing:", reply_markup=keyboard_with_back_cancel([], show_back=True)); return
+        d["from"] = text
+        d["stage"] = "to"
+        await message.answer(
+            "📦 Yuk **qayerga** yetkaziladi? Manzilni yozing:",
+            reply_markup=keyboard_with_back_cancel([], show_back=True)
+        )
+        return
 
-    # 3) Qayerga
     if stage == "to":
-        d["to"] = text; d["stage"] = "when_select"
-        await message.answer("🕒 Qaysi **vaqtga** kerak?\nTugmalardan tanlang yoki `HH:MM` yozing.", reply_markup=when_keyboard()); return
+        d["to"] = text
+        d["stage"] = "when_select"
+        await message.answer(
+            "🕒 Qaysi **vaqtga** kerak?\nTugmalardan tanlang yoki `HH:MM` yozing.",
+            reply_markup=when_keyboard()
+        )
+        return
 
-    # 4) Vaqt tanlash
     if stage == "when_select":
         if text == HOZIR:
-            d["when"] = datetime.now().strftime("%H:%M"); await finalize_and_send(message, d); return
+            d["when"] = datetime.now().strftime("%H:%M")
+            await finalize_and_send(message, d)
+            return
         if text == BOSHQA:
             d["stage"] = "when_input"
-            await message.answer("⏰ Vaqtni kiriting (`HH:MM`, masalan: `19:00`):", reply_markup=keyboard_with_back_cancel([], show_back=True)); return
+            await message.answer(
+                "⏰ Vaqtni kiriting (`HH:MM`, masalan: `19:00`):",
+                reply_markup=keyboard_with_back_cancel([], show_back=True)
+            )
+            return
         if is_hhmm(text):
-            d["when"] = normalize_hhmm(text); await finalize_and_send(message, d); return
-        await message.answer("❗️ Vaqt formati `HH:MM` bo‘lishi kerak. Yoki tugmalarni tanlang.", reply_markup=when_keyboard()); return
+            d["when"] = normalize_hhmm(text)
+            await finalize_and_send(message, d)
+            return
+        await message.answer(
+            "❗️ Vaqt formati `HH:MM` bo‘lishi kerak. Yoki tugmalarni tanlang.",
+            reply_markup=when_keyboard()
+        )
+        return
 
-    # 5) Vaqt qo‘lda kiritish
     if stage == "when_input":
         if is_hhmm(text):
-            d["when"] = normalize_hhmm(text); await finalize_and_send(message, d); return
-        await message.answer("❗️ Noto‘g‘ri format. `HH:MM` yozing (masalan: `19:00`).", reply_markup=keyboard_with_back_cancel([], show_back=True)); return
+            d["when"] = normalize_hhmm(text)
+            await finalize_and_send(message, d)
+            return
+        await message.answer(
+            "❗️ Noto‘g‘ri format. `HH:MM` yozing (masalan: `19:00`).",
+            reply_markup=keyboard_with_back_cancel([], show_back=True)
+        )
+        return
 
 # ================== YORDAMCHI (buyurtma) ==================
 def is_hhmm(s: str) -> bool:
@@ -984,13 +1283,12 @@ def human_dt(dt_str: str | None) -> str:
         return dt_str
 
 def group_post_text(customer_id: int, order: dict, status_note: str | None = None) -> str:
-    """
-    Guruh posti matni (scope/region yo‘q — soddalashtirilgan).
-    """
     customer_name = user_profiles.get(customer_id, {}).get("name", "Mijoz")
+    region = order.get("region", "—")
     base = (
         f"📦 Yangi buyurtma!\n"
         f"👤 Mijoz: {customer_name}\n"
+        f"📍 Hudud: {region}\n"
         f"🚚 Mashina: {order['vehicle']}\n"
         f"➡️ Yo‘nalish:\n"
         f"   • Qayerdan: {order['from']}\n"
@@ -1039,7 +1337,11 @@ def schedule_driver_reminders(customer_id: int):
     event_dt = _event_dt_today_or_now(order["when"], now=now)
     seconds_to_event = (event_dt - now).total_seconds()
     milestones = [(3600, "⏳ 1 soat qoldi"), (1800, "⏳ 30 daqiqa qoldi"), (900, "⏳ 15 daqiqa qoldi"), (0, "⏰ Vaqti bo‘ldi")]
-    base = f"{order['when']} vaqti uchun buyurtma.\nYo‘nalish: {order['from']} → {order['to']}\nMuvofiqlashtirishni unutmang."
+    base = (
+        f"{order['when']} vaqti uchun {order.get('region', 'Hudud')} buyurtma.\n"
+        f"Yo‘nalish: {order['from']} → {order['to']}\n"
+        "Muvofiqlashtirishni unutmang."
+    )
     order["reminder_tasks"] = []
     for offset, label in milestones:
         delay = seconds_to_event - offset
@@ -1051,7 +1353,18 @@ def schedule_driver_reminders(customer_id: int):
 # ================== GURUHGA YUBORISH + MIJOZGA BEKOR TUGMASI ==================
 async def finalize_and_send(message: types.Message, d: dict):
     uid = message.from_user.id
+    region = d.get("region") or user_profiles.get(uid, {}).get("region")
+    if not region:
+        drafts[uid]["stage"] = "region"
+        await message.answer(
+            "📍 Iltimos, hududni tanlang.",
+            reply_markup=region_keyboard(show_back=False)
+        )
+        return
+
+    chat_id = d.get("chat_id") or get_order_chat_id(region)
     order_data = {
+        "region": region,
         "vehicle": d["vehicle"],
         "from": d["from"],
         "to": d["to"],
@@ -1060,9 +1373,12 @@ async def finalize_and_send(message: types.Message, d: dict):
     ikb_group = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❗️ Qabul qilish", callback_data=f"accept_{uid}")]
     ])
-    sent = await bot.send_message(DRIVERS_CHAT_ID, group_post_text(uid, order_data), reply_markup=ikb_group)
+    sent = await bot.send_message(chat_id, group_post_text(uid, order_data), reply_markup=ikb_group)
     orders[uid] = {
-        **order_data, "msg_id": sent.message_id, "status": "open",
+        **order_data,
+        "msg_id": sent.message_id,
+        "chat_id": chat_id,
+        "status": "open",
         "driver_id": None, "cust_info_msg_id": None, "drv_info_msg_id": None,
         "cust_rating_msg_id": None, "rating": None, "reminder_tasks": []
     }
@@ -1092,6 +1408,22 @@ async def accept_order(callback: types.CallbackQuery):
         await bot.send_message(driver_id, "ℹ️ Buyurtmani qabul qilishdan oldin telefon raqamingizni yuboring.", reply_markup=contact_keyboard())
         await callback.answer("Avval telefon raqamingizni yuboring.", show_alert=True); return
 
+    order_region = order.get("region")
+    driver_region = resolve_driver_region(driver_id)
+    if order_region and driver_region and order_region.lower() != driver_region.lower():
+        await callback.answer(
+            f"Bu buyurtma {order_region} hududi uchun. Sizning hududingiz: {driver_region}.",
+            show_alert=True
+        )
+        return
+
+    chat_id = order.get("chat_id") or get_order_chat_id(order_region)
+
+    if order_region and not driver_region:
+        profile_entry = user_profiles.setdefault(driver_id, {})
+        profile_entry["region"] = order_region
+        await save_users_to_disk(user_profiles)
+
     order["status"] = "accepted"; order["driver_id"] = driver_id
 
     customer_name, customer_phone = customer.get("name", "Noma'lum"), customer.get("phone", "—")
@@ -1101,6 +1433,7 @@ async def accept_order(callback: types.CallbackQuery):
         f"✅ Buyurtma sizga biriktirildi\n\n"
         f"👤 Mijoz: {customer_name}\n"
         f"📞 Telefon: <a href=\"tg://user?id={customer_id}\">{phone_display(customer_phone)}</a>\n"
+        f"📍 Hudud: {order_region}\n"
         f"🚚 Mashina: {order['vehicle']}\n"
         f"➡️ Yo‘nalish:\n   • Qayerdan: {order['from']}\n"
         f"   • Qayerga: {order['to']}\n"
@@ -1118,15 +1451,16 @@ async def accept_order(callback: types.CallbackQuery):
         await callback.answer("Haydovchiga DM yuborilmadi. Botga /start yozing.", show_alert=True); return
 
     try:
-        await bot.edit_message_text(chat_id=DRIVERS_CHAT_ID, message_id=order["msg_id"], text=group_post_text(customer_id, order, status_note="✅ Holat: QABUL QILINDI"))
-        await bot.edit_message_reply_markup(chat_id=DRIVERS_CHAT_ID, message_id=order["msg_id"], reply_markup=None)
+        await bot.edit_message_text(chat_id=chat_id, message_id=order["msg_id"], text=group_post_text(customer_id, order, status_note="✅ Holat: QABUL QILINDI"))
+        await bot.edit_message_reply_markup(chat_id=chat_id, message_id=order["msg_id"], reply_markup=None)
     except Exception:
         pass
 
     txt_cust = (
         f"🚚 Buyurtmangizni haydovchi qabul qildi.\n\n"
         f"👨‍✈️ Haydovchi: {driver_name}\n"
-        f"📞 Telefon: <a href=\"tg://user?id={driver_id}\">{phone_display(driver_phone)}</a>"
+        f"📞 Telefon: <a href=\"tg://user?id={driver_id}\">{phone_display(driver_phone)}</a>\n"
+        f"📍 Hudud: {order_region}"
     )
     ikb_cust = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Buyurtmani bekor qilish", callback_data=f"cancel_{customer_id}")],
@@ -1160,9 +1494,10 @@ async def complete_order(callback: types.CallbackQuery):
     if drv_msg_id:
         try: await bot.edit_message_reply_markup(chat_id=driver_id, message_id=drv_msg_id, reply_markup=None)
         except Exception: pass
+    chat_id = order.get("chat_id") or get_order_chat_id(order.get("region"))
     try:
-        await bot.edit_message_text(chat_id=DRIVERS_CHAT_ID, message_id=order["msg_id"], text=group_post_text(customer_id, order, status_note="✅ Holat: YAKUNLANDI"))
-        await bot.edit_message_reply_markup(chat_id=DRIVERS_CHAT_ID, message_id=order["msg_id"], reply_markup=None)
+        await bot.edit_message_text(chat_id=chat_id, message_id=order["msg_id"], text=group_post_text(customer_id, order, status_note="✅ Holat: YAKUNLANDI"))
+        await bot.edit_message_reply_markup(chat_id=chat_id, message_id=order["msg_id"], reply_markup=None)
     except Exception: pass
 
     cust_info_id = order.get("cust_info_msg_id")
@@ -1216,11 +1551,12 @@ async def cancel_order(callback: types.CallbackQuery):
         await callback.answer("Bu buyurtma yakunlangan, bekor qilib bo‘lmaydi.", show_alert=True); return
 
     driver_id = order.get("driver_id"); caller = callback.from_user.id
+    chat_id = order.get("chat_id") or get_order_chat_id(order.get("region"))
 
     # Mijoz bekor qildi
     if caller == customer_id:
         cancel_driver_reminders(customer_id)
-        try: await bot.delete_message(chat_id=DRIVERS_CHAT_ID, message_id=order["msg_id"])
+        try: await bot.delete_message(chat_id=chat_id, message_id=order["msg_id"])
         except Exception: pass
         if driver_id:
             try: await bot.send_message(driver_id, "❌ Mijoz buyurtmani bekor qildi.")
@@ -1245,8 +1581,8 @@ async def cancel_order(callback: types.CallbackQuery):
             [InlineKeyboardButton(text="❗️ Qabul qilish", callback_data=f"accept_{customer_id}")]
         ])
         try:
-            await bot.edit_message_text(chat_id=DRIVERS_CHAT_ID, message_id=order["msg_id"], text=group_post_text(customer_id, order, status_note=None))
-            await bot.edit_message_reply_markup(chat_id=DRIVERS_CHAT_ID, message_id=order["msg_id"], reply_markup=reopen_kb)
+            await bot.edit_message_text(chat_id=chat_id, message_id=order["msg_id"], text=group_post_text(customer_id, order, status_note=None))
+            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=order["msg_id"], reply_markup=reopen_kb)
         except Exception: pass
         drv_msg_id = order.get("drv_info_msg_id")
         if drv_msg_id:
@@ -1258,7 +1594,7 @@ async def cancel_order(callback: types.CallbackQuery):
     # Admin bekor qildi
     if caller in ADMIN_IDS:
         cancel_driver_reminders(customer_id)
-        try: await bot.delete_message(chat_id=DRIVERS_CHAT_ID, message_id=order["msg_id"])
+        try: await bot.delete_message(chat_id=chat_id, message_id=order["msg_id"])
         except Exception: pass
         if driver_id:
             try: await bot.send_message(driver_id, "❌ Buyurtma admin tomonidan bekor qilindi.")
