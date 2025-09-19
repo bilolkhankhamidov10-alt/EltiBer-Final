@@ -2073,6 +2073,47 @@ async def users_count_cmd(message: types.Message):
         parse_mode="HTML"
     )
 
+
+@dp.message(Command("stats"))
+async def stats_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    total_users = len(user_profiles or {})
+    with_phone = sum(1 for _, profile in (user_profiles or {}).items() if profile.get("phone"))
+    driver_ids = [uid for uid in (user_profiles or {}).keys() if get_profile_regions(uid)]
+    drivers_total = len(driver_ids)
+
+    active_subscribers = [
+        uid for uid, data in subscriptions.items()
+        if data.get("active") and normalize_region_list(data.get("regions"))
+    ]
+    trial_active = len(trial_members or {})
+
+    region_totals: dict[str, int] = {}
+    for uid in driver_ids:
+        for region in get_profile_regions(uid):
+            region_totals[region] = region_totals.get(region, 0) + 1
+
+    if region_totals:
+        region_lines = "\n".join(
+            f"• {region}: <b>{count}</b>" for region, count in sorted(region_totals.items())
+        )
+        region_block = "\n\n📍 <b>Hududlar kesimi:</b>\n" + region_lines
+    else:
+        region_block = ""
+
+    text = (
+        f"👥 Jami foydalanuvchilar: <b>{total_users}</b>\n"
+        f"📞 Telefon saqlangan: <b>{with_phone}</b>\n"
+        f"👨‍✈️ Haydovchi profillar: <b>{drivers_total}</b>\n"
+        f"✅ Faol obuna: <b>{len(active_subscribers)}</b>\n"
+        f"🎁 Trialda: <b>{trial_active}</b>"
+        + region_block
+    )
+
+    await message.reply(text, parse_mode="HTML")
+
 # ================== ADMIN: CSV EXPORT ==================
 @dp.message(Command("export_users"))
 async def export_users_cmd(message: types.Message):
