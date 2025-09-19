@@ -800,6 +800,7 @@ async def _send_trial_invites(uid: int, regions: list[str]):
     if not regions:
         return
 
+    trial_region = regions[0]
     granted_at = datetime.now()
     expires_at = granted_at + timedelta(days=FREE_TRIAL_DAYS)
 
@@ -811,24 +812,27 @@ async def _send_trial_invites(uid: int, regions: list[str]):
 
     entry = trial_members.setdefault(uid, {"expires_at": expires_at, "regions": []})
     entry["expires_at"] = expires_at
-    existing = list(entry.get("regions") or [])
+    entry["regions"] = [trial_region]
+    entry["last_region"] = trial_region
 
-    for region in regions:
-        if region in existing:
-            continue
-        text = (
-            "🎁 <b>30 kunlik bepul sinov</b> faollashtirildi!\n\n"
-            f"📍 Hudud: {region}\n"
-            f"⏳ Amal qilish muddati: <b>{expires_at.strftime('%Y-%m-%d %H:%M')}</b> gacha.\n"
-            "Quyidagi tugma orqali guruhga qo‘shiling. Sinov tugaganda agar obuna bo‘lmasangiz, guruhdan chiqarib qo‘yiladi."
-        )
-        ok = await send_region_invite(uid, region, text)
-        if ok:
-            existing.append(region)
+    text = (
+        "🎁 <b>30 kunlik bepul sinov</b> faollashtirildi!\n\n"
+        f"📍 Hudud: {trial_region}\n"
+        f"⏳ Amal qilish muddati: <b>{expires_at.strftime('%Y-%m-%d %H:%M')}</b> gacha.\n"
+        "Quyidagi tugma orqali guruhga qo‘shiling. Sinov tugaganda agar obuna bo‘lmasangiz, guruhdan chiqarib qo‘yiladi."
+    )
+    await send_region_invite(uid, trial_region, text)
 
-    entry["regions"] = normalize_region_list(existing)
-    if entry["regions"]:
-        entry["last_region"] = entry["regions"][-1]
+    if len(regions) > 1:
+        other_regions = ", ".join(regions[1:])
+        try:
+            await bot.send_message(
+                uid,
+                "ℹ️ Qolgan hududlar ({}) uchun obuna to‘lovi talab qilinadi."
+                .format(other_regions),
+            )
+        except Exception:
+            pass
 
 async def trial_watcher():
     """
@@ -1046,9 +1050,18 @@ async def after_phone_collected(uid: int, message: types.Message):
         f"📍 <b>Hudud(lar):</b> {regions_text}",
         parse_mode="HTML"
     )
-    await message.answer(pay_text, parse_mode="HTML", reply_markup=ikb)
-    driver_onboarding[uid]["stage"] = "wait_check"
-    driver_onboarding[uid]["regions"] = regions
+
+    needs_payment = len(regions) > 1 or has_active_sub
+
+    if needs_payment:
+        await message.answer(pay_text, parse_mode="HTML", reply_markup=ikb)
+        driver_onboarding[uid]["stage"] = "wait_check"
+        driver_onboarding[uid]["regions"] = regions
+    else:
+        await message.answer(
+            "🎁 30 kunlik trial faollashtirildi. Trial tugaguncha tashkilotchi siz bilan bog‘lanadi."
+        )
+        driver_onboarding.pop(uid, None)
 
 @dp.callback_query(F.data == "send_check")
 async def send_check_cb(callback: types.CallbackQuery):
