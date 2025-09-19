@@ -149,7 +149,7 @@ def _load_regions_config() -> dict[str, dict[str, int]]:
         raise RuntimeError(
             "regions.json bo'sh. Iltimos, hech bo'lmaganda bitta hududni sozlang."
         )
-    return regions[:MAX_DRIVER_REGIONS]
+    return regions
 
 
 REGIONS = _load_regions_config()
