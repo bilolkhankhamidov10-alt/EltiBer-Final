@@ -174,6 +174,55 @@ def get_driver_chat_id(region: str) -> int:
     return DRIVER_CHAT_IDS[region]
 
 
+async def send_region_invite(uid: int, region: str, header_text: str) -> bool:
+    chat_id = get_driver_chat_id(region)
+    try:
+        invite = await bot.create_chat_invite_link(
+            chat_id=chat_id,
+            name=f"driver-{region}-{uid}-{int(datetime.now().timestamp())}",
+            member_limit=1,
+        )
+        invite_link = invite.invite_link
+    except Exception as exc:
+        for admin in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin,
+                    f"❌ {region} hududi uchun haydovchi silka yaratilmagan (user {uid}): {exc}",
+                )
+            except Exception:
+                pass
+        return False
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"👥 {region} haydovchilar guruhiga qo‘shilish",
+                    url=invite_link,
+                )
+            ]
+        ]
+    )
+    try:
+        dm = await bot.send_message(
+            uid,
+            header_text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+        pending_invites[uid] = {
+            "msg_id": dm.message_id,
+            "link": invite_link,
+            "region": region,
+            "chat_id": chat_id,
+        }
+        return True
+    except Exception:
+        return False
+
+
 def resolve_driver_region(driver_id: int) -> str | None:
     data = driver_onboarding.get(driver_id)
     if data and data.get("region"):
@@ -706,6 +755,24 @@ async def after_phone_collected(uid: int, message: types.Message):
                     f"ℹ️ Siz {dt_txt} sanada 30 kunlik bepul sinov orqali haydovchilar guruhiga qo‘shilgansiz."
                     " Bepul sinov faqat bir martalik, shuning uchun qayta havola yuborilmaydi.",
                     parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+    elif subscriptions.get(uid, {}).get("active"):
+        subscriptions.setdefault(uid, {})["region"] = region
+        text = (
+            "✅ Sizning obunangiz faol.\n\n"
+            f"📍 <b>Hudud:</b> {region}\n"
+            "Quyidagi tugma orqali haydovchilar guruhiga qo‘shiling."
+        )
+        if await send_region_invite(uid, region, text):
+            driver_onboarding.pop(uid, None)
+            return
+        else:
+            try:
+                await message.answer(
+                    "❌ Silka yaratib bo‘lmadi. Iltimos, admin bilan bog‘laning yoki keyinroq qayta urinib ko‘ring."
                 )
             except Exception:
                 pass
