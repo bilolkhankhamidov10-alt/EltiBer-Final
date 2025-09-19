@@ -163,6 +163,80 @@ def resolve_region_name(value: str | None) -> str | None:
     return None
 
 
+def normalize_region_list(values) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    if not values:
+        return result
+    if isinstance(values, str):
+        values = [values]
+    for item in values:
+        name = resolve_region_name(str(item))
+        if name and name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
+
+
+def get_profile_regions(uid: int) -> list[str]:
+    profile = user_profiles.get(uid, {})
+    regions = profile.get("regions")
+    if regions:
+        return normalize_region_list(regions)
+    legacy = profile.get("region")
+    if legacy:
+        return normalize_region_list([legacy])
+    return []
+
+
+def set_profile_regions(uid: int, regions) -> list[str]:
+    normalized = normalize_region_list(regions)
+    profile = user_profiles.setdefault(uid, {})
+    if normalized:
+        profile["regions"] = normalized
+    else:
+        profile.pop("regions", None)
+    profile.pop("region", None)
+    return normalized
+
+
+def add_profile_regions(uid: int, regions) -> list[str]:
+    current = set(get_profile_regions(uid))
+    for region in normalize_region_list(regions):
+        current.add(region)
+    return set_profile_regions(uid, list(current))
+
+
+def _normalize_existing_regions() -> None:
+    for uid in list(user_profiles.keys()):
+        set_profile_regions(uid, get_profile_regions(uid))
+
+    for uid, data in list(subscriptions.items()):
+        regions = data.get("regions") or data.get("region")
+        normalized = normalize_region_list(regions)
+        data["regions"] = normalized
+        data.pop("region", None)
+
+    for uid, data in list(trial_members.items()):
+        regions = data.get("regions") or data.get("region")
+        data["regions"] = normalize_region_list(regions)
+        data.pop("region", None)
+
+    for uid, info in list(pending_invites.items()):
+        if isinstance(info, dict) and "region" in info:
+            region = resolve_region_name(info.get("region"))
+            if not region:
+                pending_invites.pop(uid, None)
+                continue
+            pending_invites[uid] = {
+                region: {
+                    "msg_id": info.get("msg_id"),
+                    "link": info.get("link"),
+                    "chat_id": info.get("chat_id"),
+                    "region": region,
+                }
+            }
+
 def get_order_chat_id(region: str) -> int:
     if region not in ORDER_CHAT_IDS:
         raise RuntimeError(f"Noma'lum hudud: {region}")
@@ -213,39 +287,60 @@ async def send_region_invite(uid: int, region: str, header_text: str) -> bool:
             reply_markup=keyboard,
             disable_web_page_preview=True,
         )
-        pending_invites[uid] = {
+        bucket = pending_invites.setdefault(uid, {})
+        prev = bucket.get(region)
+        if prev and prev.get("msg_id") and prev.get("msg_id") != dm.message_id:
+            try:
+                await bot.delete_message(chat_id=uid, message_id=prev["msg_id"])
+            except Exception:
+                pass
+        bucket[region] = {
             "msg_id": dm.message_id,
             "link": invite_link,
-            "region": region,
             "chat_id": chat_id,
+            "region": region,
         }
         return True
     except Exception:
         return False
 
 
-def resolve_driver_region(driver_id: int) -> str | None:
+def resolve_driver_regions(driver_id: int) -> list[str]:
+    regions: list[str] = []
+
+    def _extend(source) -> None:
+        for name in normalize_region_list(source):
+            if name not in regions:
+                regions.append(name)
+
     data = driver_onboarding.get(driver_id)
-    if data and data.get("region"):
-        return data["region"]
+    if data:
+        _extend(data.get("regions"))
+        _extend(data.get("region"))
 
     sub = subscriptions.get(driver_id)
-    if sub and sub.get("region"):
-        return sub["region"]
+    if sub:
+        _extend(sub.get("regions"))
+        _extend(sub.get("region"))
 
     profile = user_profiles.get(driver_id)
-    if profile and profile.get("region"):
-        return profile["region"]
+    if profile:
+        _extend(profile.get("regions"))
+        _extend(profile.get("region"))
 
     trial = trial_members.get(driver_id)
-    if trial and trial.get("region"):
-        return trial["region"]
+    if trial:
+        _extend(trial.get("regions"))
+        _extend(trial.get("region"))
 
     pending = pending_invites.get(driver_id)
-    if pending and pending.get("region"):
-        return pending["region"]
+    if pending:
+        if isinstance(pending, dict) and all(isinstance(k, str) for k in pending.keys()):
+            _extend(pending.keys())
+        else:
+            _extend(pending.get("region"))
 
-    return None
+    return regions
 
 def load_users_from_disk() -> dict:
     raw = _load_json(USERS_JSON, {})
@@ -267,16 +362,18 @@ async def save_users_to_disk(users: dict):
 # ================== XOTIRA (RAM) ==================
 user_profiles = load_users_from_disk()
 drafts = {}          # {customer_id: {...}}
-driver_onboarding = {}  # {uid: {"stage":..., "name":..., "car_make":..., "car_plate":..., "phone":...}}
+driver_onboarding = {}  # {uid: {"stage":..., ...}}
 orders = {}             # {customer_id: {...}}
 driver_links = {}
-pending_invites = {}    # {driver_id: {"msg_id":..., "link":...}}
+pending_invites = {}    # {driver_id: {region: {"msg_id":..., "link":..., "chat_id":...}}}
 
 # ======= FREE TRIAL (30 kun bepul) — QO'SHIMCHA =======
 FREE_TRIAL_ENABLED = True
 FREE_TRIAL_DAYS = 30
-subscriptions = {}   # {driver_id: {"active": True}}
-trial_members = {}   # {driver_id: {"expires_at": datetime}}
+subscriptions = {}   # {driver_id: {"active": True, "regions": [...]}}
+trial_members = {}   # {driver_id: {"expires_at": datetime, "regions": [...]}}
+
+_normalize_existing_regions()
 
 # ================== LABELLAR ==================
 CANCEL = "❌ Bekor qilish"
@@ -286,6 +383,9 @@ BOSHQA = "⌨️ Boshqa vaqt"
 
 DRIVER_BTN  = "👨‍✈️ Haydovchi bo'lish"
 CONTACT_BTN = "📞 Biz bilan bog'lanish"
+
+REGION_DONE  = "✅ Tanlash tugadi"
+REGION_CLEAR = "🗑 Tanlovni tozalash"
 
 CONTACT_PHONE = "+998 50 330 77 07"
 CONTACT_PHONE_LINK = CONTACT_PHONE.replace(" ", "")
@@ -306,6 +406,18 @@ def keyboard_with_back_cancel(options, per_row=3, show_back=True):
 
 def region_keyboard(show_back: bool = False) -> ReplyKeyboardMarkup:
     return keyboard_with_back_cancel(REGION_NAMES, per_row=3, show_back=show_back)
+
+
+def driver_region_keyboard(include_back: bool) -> ReplyKeyboardMarkup:
+    rows = rows_from_list(REGION_NAMES, per_row=3)
+    rows.append([KeyboardButton(text=REGION_DONE)])
+    rows.append([KeyboardButton(text=REGION_CLEAR)])
+    control_row = []
+    if include_back:
+        control_row.append(KeyboardButton(text=BACK))
+    control_row.append(KeyboardButton(text=CANCEL))
+    rows.append(control_row)
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 def vehicle_keyboard():
     VEHICLES = ["🛻 Labo", "🚚 Labodan Kattaroq"]
@@ -492,16 +604,18 @@ async def haydovchi_bolish(message: types.Message):
 async def driver_agree_cb(callback: types.CallbackQuery):
     uid = callback.from_user.id
     driver_onboarding[uid] = {
-        "stage": "region",
-        "region": None,
+        "stage": "regions",
+        "regions": [],
         "name": None,
         "car_make": None,
         "car_plate": None,
         "phone": None,
     }
     await callback.message.answer(
-        "📍 Qaysi hudud uchun haydovchi bo‘lasiz?",
-        reply_markup=region_keyboard(show_back=False)
+        "📍 Qaysi hududlar uchun haydovchi bo‘lasiz?\n"
+        "Bir nechta hududni ketma-ket tanlang. Tanlash tugagach “✅ Tanlash tugadi” tugmasini bosing."
+        "\nHududni yana bosish orqali tanlovdan olib tashlashingiz mumkin.",
+        reply_markup=driver_region_keyboard(include_back=False)
     )
     await callback.answer()
 
@@ -518,20 +632,56 @@ async def onboarding_or_order_text(message: types.Message):
     if uid in driver_onboarding:
         st = driver_onboarding[uid].get("stage")
 
-        if st == "region":
+        if st == "regions":
+            regions_list = driver_onboarding[uid].setdefault("regions", [])
+            if txt == REGION_DONE:
+                if not regions_list:
+                    await message.answer(
+                        "❗️ Hech bo‘lmaganda bitta hududni tanlang.",
+                        reply_markup=driver_region_keyboard(include_back=False)
+                    )
+                    return
+                driver_onboarding[uid]["stage"] = "name"
+                await message.answer(
+                    "✍️ Iltimos, <b>Ism Familiya</b>ingizni yuboring:",
+                    parse_mode="HTML",
+                    reply_markup=keyboard_with_back_cancel([], show_back=True)
+                )
+                return
+            if txt == REGION_CLEAR:
+                driver_onboarding[uid]["regions"] = []
+                await message.answer(
+                    "✅ Tanlov tozalandi. Yangi hududlarni tanlang.",
+                    reply_markup=driver_region_keyboard(include_back=False)
+                )
+                return
+
             selected = resolve_region_name(txt)
             if not selected:
                 await message.answer(
-                    "❗️ Iltimos, hududni tugmalardan tanlang.",
-                    reply_markup=region_keyboard(show_back=True)
+                    "❗️ Iltimos, hududni tugmalar yordamida tanlang.",
+                    reply_markup=driver_region_keyboard(include_back=False)
                 )
                 return
-            driver_onboarding[uid]["region"] = selected
-            driver_onboarding[uid]["stage"] = "name"
+
+            if selected in regions_list:
+                regions_list.remove(selected)
+                await message.answer(
+                    f"ℹ️ <b>{selected}</b> hududi tanlovdan olib tashlandi."
+                    "\nYana hudud tanlang yoki “✅ Tanlash tugadi” tugmasini bosing.",
+                    parse_mode="HTML",
+                    reply_markup=driver_region_keyboard(include_back=False)
+                )
+                return
+
+            regions_list.append(selected)
             await message.answer(
-                "✍️ Iltimos, <b>Ism Familiya</b>ingizni yuboring:",
+                "✅ Hudud qo‘shildi: <b>{selected}</b>\n"
+                "Tanlangan hududlar: <b>{all_regions}</b>\n"
+                "Yana hudud tanlang yoki “✅ Tanlash tugadi” tugmasini bosing."
+                .format(selected=selected, all_regions=", ".join(regions_list)),
                 parse_mode="HTML",
-                reply_markup=keyboard_with_back_cancel([], show_back=True)
+                reply_markup=driver_region_keyboard(include_back=False)
             )
             return
 
@@ -571,66 +721,38 @@ async def onboarding_or_order_text(message: types.Message):
     await collect_flow(message)
 
 # ================== YORDAMCHI (trial) — QO'SHIMCHA ==================
-async def _send_trial_invite(uid: int, region: str):
-    """
-    30 kunlik bepul sinov uchun bitta martalik invite yaratadi va haydovchiga yuboradi.
-    """
-    driver_chat_id = get_driver_chat_id(region)
-
-    try:
-        granted_at = datetime.now()
-        expires_at = granted_at + timedelta(days=FREE_TRIAL_DAYS)
-        invite = await bot.create_chat_invite_link(
-            chat_id=driver_chat_id,
-            name=f"trial-{uid}",
-            member_limit=1,
-            expire_date=int(expires_at.timestamp())
-        )
-        invite_link = invite.invite_link
-    except Exception as e:
-        for admin in ADMIN_IDS:
-            try:
-                await bot.send_message(admin, f"❌ Trial silka yaratilmadi (user {uid}): {e}")
-            except Exception:
-                pass
-        try:
-            await bot.send_message(uid, "❌ Kechirasiz, hozircha trial havola yaratilmayapti. Iltimos, admin bilan bog‘laning.")
-        except Exception:
-            pass
+async def _send_trial_invites(uid: int, regions: list[str]):
+    regions = normalize_region_list(regions)
+    if not regions:
         return
 
-    trial_members[uid] = {"expires_at": expires_at, "region": region}
+    granted_at = datetime.now()
+    expires_at = granted_at + timedelta(days=FREE_TRIAL_DAYS)
 
     profile = user_profiles.setdefault(uid, {})
     profile["trial_granted_at"] = granted_at.isoformat()
     profile["trial_expires_at"] = expires_at.isoformat()
-    profile.setdefault("region", region)
+    add_profile_regions(uid, regions)
     await save_users_to_disk(user_profiles)
 
-    ikb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Haydovchilar guruhiga qo‘shilish (30 kun bepul)", url=invite_link)]
-    ])
-    try:
-        dm = await bot.send_message(
-            chat_id=uid,
-            text=(
-                f"🎁 <b>30 kunlik bepul sinov</b> faollashtirildi!\n\n"
-                f"📍 Hudud: {region}\n"
-                f"⏳ Amal qilish muddati: <b>{expires_at.strftime('%Y-%m-%d %H:%M')}</b> gacha.\n"
-                "Quyidagi tugma orqali guruhga qo‘shiling. Sinov tugaganda agar obuna bo‘lmasangiz, guruhdan chiqarib qo‘yiladi."
-            ),
-            parse_mode="HTML",
-            reply_markup=ikb,
-            disable_web_page_preview=True
+    entry = trial_members.setdefault(uid, {"expires_at": expires_at, "regions": []})
+    entry["expires_at"] = expires_at
+    existing = set(entry.get("regions") or [])
+
+    for region in regions:
+        if region in existing:
+            continue
+        text = (
+            "🎁 <b>30 kunlik bepul sinov</b> faollashtirildi!\n\n"
+            f"📍 Hudud: {region}\n"
+            f"⏳ Amal qilish muddati: <b>{expires_at.strftime('%Y-%m-%d %H:%M')}</b> gacha.\n"
+            "Quyidagi tugma orqali guruhga qo‘shiling. Sinov tugaganda agar obuna bo‘lmasangiz, guruhdan chiqarib qo‘yiladi."
         )
-        pending_invites[uid] = {
-            "msg_id": dm.message_id,
-            "link": invite_link,
-            "region": region,
-            "chat_id": driver_chat_id,
-        }
-    except Exception:
-        pass
+        ok = await send_region_invite(uid, region, text)
+        if ok:
+            existing.add(region)
+
+    entry["regions"] = normalize_region_list(existing)
 
 async def trial_watcher():
     """
@@ -647,59 +769,64 @@ async def trial_watcher():
                     continue
 
                 exp = info.get("expires_at")
-                region = info.get("region") or user_profiles.get(uid, {}).get("region")
-                if not region:
-                    continue
-                try:
-                    chat_id = get_driver_chat_id(region)
-                except Exception:
-                    continue
+                regions = normalize_region_list(info.get("regions"))
+                if not regions:
+                    regions = get_profile_regions(uid)
 
-                if exp and now >= exp:
-                    try:
-                        await bot.ban_chat_member(chat_id, uid)
-                        await bot.unban_chat_member(chat_id, uid)
-                    except Exception:
-                        pass
+                if exp and now >= exp and regions:
+                    for region in regions:
+                        try:
+                            chat_id = get_driver_chat_id(region)
+                        except Exception:
+                            continue
 
-                    price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
-                    pay_text = (
-                        "⛔️ <b>30 kunlik bepul sinov muddati tugadi.</b>\n\n"
-                        f"📍 <b>Hudud:</b> {region}\n"
-                        f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
-                        f"🧾 <b>Karta:</b> <code>{CARD_NUMBER_DISPLAY}</code>\n"
-                        f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
-                        "✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring.\n"
-                        "Tasdiqlangach, sizga <b>haydovchilar guruhiga</b> qayta qo‘shilish havolasini yuboramiz."
-                    )
+                        try:
+                            await bot.ban_chat_member(chat_id, uid)
+                            await bot.unban_chat_member(chat_id, uid)
+                        except Exception:
+                            pass
 
-                    if SUPPORTS_COPY_TEXT:
-                        ikb = InlineKeyboardMarkup(
-                            inline_keyboard=[
-                                [
-                                    InlineKeyboardButton(
-                                        text="📋 Karta raqamini nusxalash",
-                                        copy_text=CopyTextButton(text=CARD_NUMBER_DISPLAY)
-                                    )
-                                ],
-                                [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")],
-                            ]
-                        )
-                    else:
-                        ikb = InlineKeyboardMarkup(
-                            inline_keyboard=[
-                                [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
-                            ]
+                        price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
+                        pay_text = (
+                            "⛔️ <b>30 kunlik bepul sinov muddati tugadi.</b>\n\n"
+                            f"📍 <b>Hudud:</b> {region}\n"
+                            f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
+                            f"🧾 <b>Karta:</b> <code>{CARD_NUMBER_DISPLAY}</code>\n"
+                            f"👤 Karta egasi: <b>{CARD_HOLDER}</b>\n\n"
+                            "✅ To‘lovni amalga oshirgach, <b>chek rasm</b>ini yuboring.\n"
+                            "Tasdiqlangach, sizga <b>haydovchilar guruhiga</b> qayta qo‘shilish havolasini yuboramiz."
                         )
 
-                    driver_onboarding[uid] = driver_onboarding.get(uid, {})
-                    driver_onboarding[uid]["stage"] = "wait_check"
-                    driver_onboarding[uid]["region"] = region
+                        if SUPPORTS_COPY_TEXT:
+                            ikb = InlineKeyboardMarkup(
+                                inline_keyboard=[
+                                    [
+                                        InlineKeyboardButton(
+                                            text="📋 Karta raqamini nusxalash",
+                                            copy_text=CopyTextButton(text=CARD_NUMBER_DISPLAY)
+                                        )
+                                    ],
+                                    [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")],
+                                ]
+                            )
+                        else:
+                            ikb = InlineKeyboardMarkup(
+                                inline_keyboard=[
+                                    [InlineKeyboardButton(text="📤 Chekni yuborish", callback_data="send_check")]
+                                ]
+                            )
 
-                    try:
-                        await bot.send_message(uid, pay_text, parse_mode="HTML", reply_markup=ikb)
-                    except Exception:
-                        pass
+                        driver_state = driver_onboarding.setdefault(uid, {})
+                        driver_state["stage"] = "wait_check"
+                        regions_state = normalize_region_list(driver_state.get("regions"))
+                        if region not in regions_state:
+                            regions_state.append(region)
+                        driver_state["regions"] = regions_state
+
+                        try:
+                            await bot.send_message(uid, pay_text, parse_mode="HTML", reply_markup=ikb)
+                        except Exception:
+                            pass
 
                     trial_members.pop(uid, None)
 
@@ -715,41 +842,46 @@ async def after_phone_collected(uid: int, message: types.Message):
     car_make = data.get("car_make", "—")
     car_plate = data.get("car_plate", "—")
     phone = data.get("phone", "—")
-    region = data.get("region") or user_profiles.get(uid, {}).get("region")
+    regions = normalize_region_list(data.get("regions"))
+    if not regions:
+        regions = get_profile_regions(uid)
 
-    if not region:
-        driver_onboarding.setdefault(uid, {})["stage"] = "region"
+    if not regions:
+        driver_onboarding.setdefault(uid, {})["stage"] = "regions"
         await message.answer(
-            "📍 Iltimos, hududni tanlang.",
-            reply_markup=region_keyboard(show_back=True)
+            "📍 Iltimos, hududlarni tanlang.",
+            reply_markup=driver_region_keyboard(include_back=False)
         )
         return
 
-    if uid in user_profiles:
-        user_profiles[uid]["phone"] = phone if phone and phone != "—" else user_profiles[uid].get("phone")
-        user_profiles[uid]["name"] = user_profiles[uid].get("name") or name
-        user_profiles[uid]["region"] = region
-    else:
-        user_profiles[uid] = {"name": name, "phone": phone, "region": region}
-    # ✅ har doim saqlaymiz
+    driver_onboarding[uid]["regions"] = regions
+
+    profile_entry = user_profiles.setdefault(uid, {})
+    if phone and phone != "—":
+        profile_entry["phone"] = phone
+    if name and name != "—":
+        profile_entry["name"] = profile_entry.get("name") or name
+    set_profile_regions(uid, regions)
     await save_users_to_disk(user_profiles)
 
     profile = user_profiles.get(uid, {})
     trial_granted_at = profile.get("trial_granted_at")
     trial_joined_at = profile.get("trial_joined_at")
 
-    # >>> Trial yoqilgan bo‘lsa — 30 kunlik havola yuboramiz
-    if FREE_TRIAL_ENABLED and not subscriptions.get(uid, {}).get("active"):
+    sub_entry = subscriptions.get(uid) or {}
+    has_active_sub = bool(sub_entry.get("active"))
+
+    if FREE_TRIAL_ENABLED and not has_active_sub:
         if not trial_granted_at:
             try:
                 await message.answer(
                     "🎁 Siz uchun <b>30 kunlik bepul sinov</b> ishga tushiriladi.\n"
-                    "Bir zumda havolani yuboraman...",
+                    "Bir zumda havolalarni yuboraman...",
                     parse_mode="HTML"
                 )
             except Exception:
                 pass
-            await _send_trial_invite(uid, region)
+            await _send_trial_invites(uid, regions)
             driver_onboarding.pop(uid, None)
             return
         else:
@@ -763,25 +895,41 @@ async def after_phone_collected(uid: int, message: types.Message):
             except Exception:
                 pass
 
-    elif subscriptions.get(uid, {}).get("active"):
-        subscriptions.setdefault(uid, {})["region"] = region
-        text = (
-            "✅ Sizning obunangiz faol.\n\n"
-            f"📍 <b>Hudud:</b> {region}\n"
-            "Quyidagi tugma orqali haydovchilar guruhiga qo‘shiling."
-        )
-        if await send_region_invite(uid, region, text):
+    elif has_active_sub:
+        active_regions = set(normalize_region_list(sub_entry.get("regions")))
+        new_regions = [r for r in regions if r not in active_regions]
+        successful: list[str] = []
+        for region in new_regions:
+            text = (
+                "✅ Sizning obunangiz faol.\n\n"
+                f"📍 <b>Hudud:</b> {region}\n"
+                "Quyidagi tugma orqali haydovchilar guruhiga qo‘shiling."
+            )
+            if await send_region_invite(uid, region, text):
+                active_regions.add(region)
+                successful.append(region)
+        if active_regions:
+            sub_entry["active"] = True
+            sub_entry["regions"] = normalize_region_list(active_regions)
+        subscriptions[uid] = sub_entry
+        if new_regions:
+            if successful:
+                driver_onboarding.pop(uid, None)
+                return
+            await message.answer(
+                "❌ Silka yaratib bo‘lmadi. Iltimos, admin bilan bog‘laning yoki keyinroq qayta urinib ko‘ring.",
+                reply_markup=order_keyboard()
+            )
             driver_onboarding.pop(uid, None)
             return
-        else:
-            try:
-                await message.answer(
-                    "❌ Silka yaratib bo‘lmadi. Iltimos, admin bilan bog‘laning yoki keyinroq qayta urinib ko‘ring."
-                )
-            except Exception:
-                pass
+        if not new_regions:
+            await message.answer(
+                "ℹ️ Tanlangan hududlar uchun obuna allaqachon faol.",
+                reply_markup=order_keyboard()
+            )
+            driver_onboarding.pop(uid, None)
+            return
 
-    # ======== Asl to‘lov oqimi ========
     price_txt = f"{SUBSCRIPTION_PRICE:,}".replace(",", " ")
     pay_text = (
         f"💳 <b>Obuna to‘lovi:</b> <code>{price_txt} so‘m</code> (1 oy)\n"
@@ -810,18 +958,19 @@ async def after_phone_collected(uid: int, message: types.Message):
             ]
         )
 
+    regions_text = ", ".join(regions)
     await message.answer(
         "Ma’lumotlaringiz qabul qilindi ✅\n\n"
         f"👤 <b>F.I.Sh:</b> {name}\n"
         f"🚗 <b>Avtomobil:</b> {car_make}\n"
         f"🔢 <b>Raqam:</b> {car_plate}\n"
         f"📞 <b>Telefon:</b> {phone_display(user_profiles.get(uid, {}).get('phone', phone))}\n"
-        f"📍 <b>Hudud:</b> {region}",
+        f"📍 <b>Hudud(lar):</b> {regions_text}",
         parse_mode="HTML"
     )
     await message.answer(pay_text, parse_mode="HTML", reply_markup=ikb)
     driver_onboarding[uid]["stage"] = "wait_check"
-    driver_onboarding[uid]["region"] = region
+    driver_onboarding[uid]["regions"] = regions
 
 @dp.callback_query(F.data == "send_check")
 async def send_check_cb(callback: types.CallbackQuery):
@@ -846,15 +995,22 @@ async def _build_check_caption(uid: int, data: dict) -> str:
     car_make  = data.get("car_make", "—")
     car_plate = data.get("car_plate", "—")
     phone     = data.get("phone", "—")
-    region    = data.get("region") or resolve_driver_region(uid) or "—"
-    data["region"] = region
+    regions   = data.get("regions") or data.get("region")
+    region_list = normalize_region_list(regions)
+    if not region_list:
+        region_list = resolve_driver_regions(uid)
+    if not region_list:
+        region_list = ["—"]
+    else:
+        data["regions"] = region_list
+    region_text = ", ".join(region_list)
     cap = (
         "🧾 <b>Yangi obuna to‘lovi (haydovchi)</b>\n"
         f"👤 <b>F.I.Sh:</b> {name}\n"
         f"🚗 <b>Avtomobil:</b> {car_make}\n"
         f"🔢 <b>Raqam:</b> {car_plate}\n"
         f"📞 <b>Telefon:</b> {phone}\n"
-        f"📍 <b>Hudud:</b> {region}\n"
+        f"📍 <b>Hudud(lar):</b> {region_text}\n"
         f"🔗 <b>Profil:</b> <a href=\"tg://user?id={uid}\">{uid}</a>\n\n"
         f"💳 <b>Miqdor:</b> {SUBSCRIPTION_PRICE:,} so‘m\n"
         "⚠️ <i>Ogohlantirish: soxtalashtirilgan chek yuborgan shaxsga nisbatan "
@@ -940,61 +1096,41 @@ async def receive_check_document(message: types.Message):
 
 # ================== ADMIN: Tasdiqlash/Rad etish tugmalari callbacklari ==================
 async def _send_driver_invite_and_mark(callback: types.CallbackQuery, driver_id: int):
-    region = resolve_driver_region(driver_id)
-    if not region:
+    regions = resolve_driver_regions(driver_id)
+    if not regions:
         await callback.answer(
-            "Haydovchining hududi aniqlanmadi. Iltimos, hududni qayta tanlang.",
-            show_alert=True
+            "Haydovchining hududlari aniqlanmadi. Iltimos, hududlarni qayta tanlang.",
+            show_alert=True,
         )
         return
 
-    chat_id = get_driver_chat_id(region)
-
-    try:
-        invite = await bot.create_chat_invite_link(
-            chat_id=chat_id,
-            name=f"driver-{driver_id}",
-            member_limit=1
+    sent_any = False
+    for region in regions:
+        text = (
+            "✅ <b>To‘lov tasdiqlandi.</b>\n\n"
+            f"📍 <b>Hudud:</b> {region}\n"
+            "Quyidagi tugma orqali haydovchilar guruhiga qo‘shiling. "
+            "Guruhga qo‘shilgandan so‘ng bu xabar avtomatik o‘chiriladi."
         )
-        invite_link = invite.invite_link
-    except Exception as e:
-        await callback.answer(f"❌ Silka yaratilmedi: {e}", show_alert=True)
+        ok = await send_region_invite(driver_id, region, text)
+        sent_any = sent_any or ok
+
+    if not sent_any:
+        await callback.answer("❌ Silka yuborilmadi. Iltimos, keyinroq qayta urinib ko‘ring.", show_alert=True)
         return
 
-    # Haydovchiga DM
-    ikb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Haydovchilar guruhiga qo‘shilish", url=invite_link)]
-    ])
-    try:
-        dm = await bot.send_message(
-            chat_id=driver_id,
-            text=(
-                "✅ <b>To‘lov tasdiqlandi.</b>\n\n"
-                f"Quyidagi tugma orqali <b>{region}</b> haydovchilar guruhiga qo‘shiling. "
-                "Guruhga qo‘shilgandan so‘ng bu xabar avtomatik o‘chiriladi."
-            ),
-            parse_mode="HTML",
-            reply_markup=ikb,
-            disable_web_page_preview=True
-        )
-        pending_invites[driver_id] = {
-            "msg_id": dm.message_id,
-            "link": invite_link,
-            "region": region,
-            "chat_id": chat_id,
-        }
-        # >>> To'lov tasdiqlandi: obuna faollashdi (trial bo'lsa ham bekor qilamiz)
-        subscriptions[driver_id] = {"active": True, "region": region}
-        trial_members.pop(driver_id, None)
-    except Exception as e:
-        await callback.answer("❌ Haydovchiga DM yuborilmadi (botga /start yozmagan bo‘lishi mumkin).", show_alert=True)
-        return
+    normalized_regions = normalize_region_list(regions)
+    subscriptions[driver_id] = {"active": True, "regions": normalized_regions}
+    trial_members.pop(driver_id, None)
 
     # Cheklar guruhidagi xabarni 'Tasdiqlandi' deb yangilash va tugmalarni o‘chirish
     try:
         orig_cap = callback.message.caption or ""
         admin_name = callback.from_user.username or callback.from_user.full_name
-        new_cap = f"{orig_cap}\n\n✅ <b>Tasdiqlandi</b> — {admin_name} • {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        new_cap = (
+            f"{orig_cap}\n\n✅ <b>Tasdiqlandi</b> — {admin_name} • {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            f"\n📍 Hududlar: {', '.join(normalized_regions)}"
+        )
         await bot.edit_message_caption(
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
@@ -1076,51 +1212,31 @@ async def admin_confirm_payment(message: types.Message):
         return
 
     driver_id = int(parts[1])
-
-    region = resolve_driver_region(driver_id)
-    if not region:
-        await message.reply("❌ Haydovchining hududi aniqlanmadi. Avval haydovchi hududni tanlashi kerak.")
+    regions = resolve_driver_regions(driver_id)
+    if not regions:
+        await message.reply("❌ Haydovchining hududlari aniqlanmadi. Avval haydovchi hududlarni tanlashi kerak.")
         return
 
-    chat_id = get_driver_chat_id(region)
-
-    try:
-        invite = await bot.create_chat_invite_link(
-            chat_id=chat_id,
-            name=f"driver-{driver_id}",
-            member_limit=1
+    sent_any = False
+    for region in regions:
+        text = (
+            "✅ <b>To‘lov tasdiqlandi.</b>\n\n"
+            f"📍 <b>Hudud:</b> {region}\n"
+            "Quyidagi tugma orqali haydovchilar guruhiga qo‘shiling. "
+            "Guruhga qo‘shilgandan so‘ng bu xabar avtomatik o‘chiriladi."
         )
-        invite_link = invite.invite_link
-    except Exception:
-        await message.reply("❌ Taklif havolasini yaratib bo‘lmadi. Bot guruhda admin ekanini tekshiring.")
-        return
+        ok = await send_region_invite(driver_id, region, text)
+        sent_any = sent_any or ok
 
-    ikb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Haydovchilar guruhiga qo‘shilish", url=invite_link)]
-    ])
-    try:
-        dm = await bot.send_message(
-            chat_id=driver_id,
-            text=(
-                "✅ <b>To‘lov tasdiqlandi.</b>\n\n"
-                f"Quyidagi tugma orqali <b>{region}</b> haydovchilar guruhiga qo‘shiling. "
-                "Guruhga qo‘shilgandan so‘ng bu xabar avtomatik o‘chiriladi."
-            ),
-            parse_mode="HTML",
-            reply_markup=ikb,
-            disable_web_page_preview=True
-        )
-        pending_invites[driver_id] = {
-            "msg_id": dm.message_id,
-            "link": invite_link,
-            "region": region,
-            "chat_id": chat_id,
-        }
-        subscriptions[driver_id] = {"active": True, "region": region}
+    if sent_any:
+        subscriptions[driver_id] = {"active": True, "regions": normalize_region_list(regions)}
         trial_members.pop(driver_id, None)
-        await message.reply(f"✅ Silka yuborildi: <code>{driver_id}</code>", parse_mode="HTML")
-    except Exception:
-        await message.reply("❌ Haydovchiga DM yuborib bo‘lmadi (botga /start yozmagan bo‘lishi mumkin).")
+        await message.reply(
+            "✅ Silka(l)ar yuborildi: " + ", ".join(normalize_region_list(regions)),
+            parse_mode="HTML",
+        )
+    else:
+        await message.reply("❌ Haydovchiga DM yuborilmadi (botga /start yozmagan bo‘lishi mumkin).")
 
 # ================== CHAT MEMBER UPDATE: guruhga qo‘shilganda DM’ni o‘chirish ==================
 @dp.chat_member()
@@ -1133,23 +1249,41 @@ async def on_chat_member(update: types.ChatMemberUpdated):
         new_status = update.new_chat_member.status
         user = update.new_chat_member.user
         if new_status in ("member", "administrator") and old_status in ("left", "kicked"):
-            pend = pending_invites.pop(user.id, None)
-            if pend:
+            pend_map = pending_invites.get(user.id) or {}
+            matched_region = None
+            matched_info = None
+            if isinstance(pend_map, dict):
+                for region_key, info in list(pend_map.items()):
+                    if info.get("chat_id") == chat_id:
+                        matched_region = region_key
+                        matched_info = info
+                        del pend_map[region_key]
+                if pend_map:
+                    pending_invites[user.id] = pend_map
+                elif user.id in pending_invites:
+                    pending_invites.pop(user.id, None)
+
+            if matched_info and matched_info.get("msg_id"):
                 try:
-                    await bot.delete_message(chat_id=user.id, message_id=pend["msg_id"])
+                    await bot.delete_message(chat_id=user.id, message_id=matched_info["msg_id"])
                 except Exception:
                     pass
+            if matched_region:
                 try:
                     await bot.send_message(user.id, "🎉 Guruhga muvaffaqiyatli qo‘shildingiz! Ishingizga omad.")
                 except Exception:
                     pass
-            region = (pend or {}).get("region") or DRIVER_CHAT_ID_TO_REGION.get(chat_id)
+
+            region = matched_region or DRIVER_CHAT_ID_TO_REGION.get(chat_id)
             profile = user_profiles.setdefault(user.id, {})
             if region:
-                profile.setdefault("region", region)
-                subscriptions.setdefault(user.id, {}).setdefault("region", region)
-                if user.id in trial_members:
-                    trial_members[user.id].setdefault("region", region)
+                add_profile_regions(user.id, [region])
+                sub_entry = subscriptions.setdefault(user.id, {})
+                if sub_entry.get("active"):
+                    sub_entry["regions"] = normalize_region_list(sub_entry.get("regions") or [region])
+                trial_entry = trial_members.get(user.id)
+                if trial_entry:
+                    trial_entry["regions"] = normalize_region_list(trial_entry.get("regions") or [region])
             if profile.get("trial_granted_at") and not profile.get("trial_joined_at"):
                 profile["trial_joined_at"] = datetime.now().isoformat()
                 await save_users_to_disk(user_profiles)
@@ -1164,16 +1298,15 @@ async def back_flow(message: types.Message):
     # Onboarding ortga
     if uid in driver_onboarding:
         st = driver_onboarding[uid].get("stage")
-        if st == "region":
+        if st == "regions":
             driver_onboarding.pop(uid, None)
             await message.answer("Asosiy menyu", reply_markup=order_keyboard()); return
         if st == "name":
-            driver_onboarding[uid]["stage"] = "region"
+            driver_onboarding[uid]["stage"] = "regions"
             driver_onboarding[uid]["name"] = None
-            driver_onboarding[uid]["region"] = None
             await message.answer(
-                "📍 Qaysi hudud uchun haydovchi bo‘lasiz?",
-                reply_markup=region_keyboard(show_back=True)
+                "📍 Qaysi hududlar uchun haydovchi bo‘lasiz?",
+                reply_markup=driver_region_keyboard(include_back=False)
             ); return
         if st == "car_make":
             driver_onboarding[uid]["stage"] = "name"
@@ -1266,7 +1399,7 @@ async def collect_flow(message: types.Message):
         await remove_confirm_message(uid, d)
         d["region"] = selected
         d["chat_id"] = get_order_chat_id(selected)
-        user_profiles.setdefault(uid, {})["region"] = selected
+        user_profiles.setdefault(uid, {})["last_region"] = selected
         await save_users_to_disk(user_profiles)
         d["stage"] = "vehicle"
         await message.answer(
@@ -1595,20 +1728,22 @@ async def accept_order(callback: types.CallbackQuery):
         await callback.answer("Avval telefon raqamingizni yuboring.", show_alert=True); return
 
     order_region = order.get("region")
-    driver_region = resolve_driver_region(driver_id)
-    if order_region and driver_region and order_region.lower() != driver_region.lower():
-        await callback.answer(
-            f"Bu buyurtma {order_region} hududi uchun. Sizning hududingiz: {driver_region}.",
-            show_alert=True
-        )
-        return
+    driver_regions = resolve_driver_regions(driver_id)
+    if order_region:
+        if driver_regions and order_region not in driver_regions:
+            await callback.answer(
+                "Bu buyurtma {region} hududi uchun. Siz tanlagan hududlar: {selected}.".format(
+                    region=order_region,
+                    selected=", ".join(driver_regions),
+                ),
+                show_alert=True,
+            )
+            return
+        if not driver_regions:
+            add_profile_regions(driver_id, [order_region])
+            driver_regions = [order_region]
 
     chat_id = order.get("chat_id") or get_order_chat_id(order_region)
-
-    if order_region and not driver_region:
-        profile_entry = user_profiles.setdefault(driver_id, {})
-        profile_entry["region"] = order_region
-        await save_users_to_disk(user_profiles)
 
     order["status"] = "accepted"; order["driver_id"] = driver_id
 
