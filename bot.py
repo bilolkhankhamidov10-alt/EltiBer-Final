@@ -34,6 +34,7 @@ ADMIN_IDS = [6948926876]
 CARD_NUMBER = "5614682216212664"
 CARD_HOLDER = "BILOL HAMIDOV"
 SUBSCRIPTION_PRICE = 99_000
+CARD_NUMBER_DISPLAY = CARD_NUMBER
 
 bot = Bot(token=TOKEN)
 dp  = Dispatcher()
@@ -448,6 +449,9 @@ async def prompt_order_flow(message: types.Message):
 @dp.message(F.text == CANCEL)
 async def cancel_flow(message: types.Message):
     uid = message.from_user.id
+    draft = drafts.get(uid)
+    if draft:
+        await remove_confirm_message(uid, draft)
     drafts.pop(uid, None)
     driver_onboarding.pop(uid, None)
     await message.answer("❌ Bekor qilindi.", reply_markup=order_keyboard())
@@ -1206,6 +1210,13 @@ async def back_flow(message: types.Message):
             ); return
         drafts.pop(uid, None)
         await message.answer("Asosiy menyu", reply_markup=order_keyboard()); return
+    if stage == "confirm":
+        await remove_confirm_message(uid, d)
+        d["stage"] = "when_select"
+        await message.answer(
+            "🕒 Qaysi **vaqtga** kerak?\nTugmalardan tanlang yoki `HH:MM` yozing.",
+            reply_markup=when_keyboard()
+        ); return
     if stage == "from":
         d["stage"] = "vehicle"
         d["vehicle"] = None
@@ -1252,6 +1263,7 @@ async def collect_flow(message: types.Message):
                 reply_markup=region_keyboard(show_back=False)
             )
             return
+        await remove_confirm_message(uid, d)
         d["region"] = selected
         d["chat_id"] = get_order_chat_id(selected)
         user_profiles.setdefault(uid, {})["region"] = selected
@@ -1264,6 +1276,7 @@ async def collect_flow(message: types.Message):
         return
 
     if stage == "vehicle":
+        await remove_confirm_message(uid, d)
         d["vehicle"] = text if text else "Noma'lum"
         d["stage"] = "from"
         await message.answer(
@@ -1273,6 +1286,7 @@ async def collect_flow(message: types.Message):
         return
 
     if stage == "from":
+        await remove_confirm_message(uid, d)
         d["from"] = text
         d["stage"] = "to"
         await message.answer(
@@ -1282,6 +1296,7 @@ async def collect_flow(message: types.Message):
         return
 
     if stage == "to":
+        await remove_confirm_message(uid, d)
         d["to"] = text
         d["stage"] = "when_select"
         await message.answer(
@@ -1291,9 +1306,11 @@ async def collect_flow(message: types.Message):
         return
 
     if stage == "when_select":
+        await remove_confirm_message(uid, d)
         if text == HOZIR:
             d["when"] = datetime.now().strftime("%H:%M")
-            await finalize_and_send(message, d)
+            d["stage"] = "confirm"
+            await send_draft_confirmation(uid, message, d)
             return
         if text == BOSHQA:
             d["stage"] = "when_input"
@@ -1304,7 +1321,8 @@ async def collect_flow(message: types.Message):
             return
         if is_hhmm(text):
             d["when"] = normalize_hhmm(text)
-            await finalize_and_send(message, d)
+            d["stage"] = "confirm"
+            await send_draft_confirmation(uid, message, d)
             return
         await message.answer(
             "❗️ Vaqt formati `HH:MM` bo‘lishi kerak. Yoki tugmalarni tanlang.",
@@ -1313,13 +1331,21 @@ async def collect_flow(message: types.Message):
         return
 
     if stage == "when_input":
+        await remove_confirm_message(uid, d)
         if is_hhmm(text):
             d["when"] = normalize_hhmm(text)
-            await finalize_and_send(message, d)
+            d["stage"] = "confirm"
+            await send_draft_confirmation(uid, message, d)
             return
         await message.answer(
             "❗️ Noto‘g‘ri format. `HH:MM` yozing (masalan: `19:00`).",
             reply_markup=keyboard_with_back_cancel([], show_back=True)
+        )
+        return
+
+    if stage == "confirm":
+        await message.answer(
+            "ℹ️ Iltimos, buyurtmani tasdiqlash uchun pastdagi tugmalarni bosing yoki 'Ortga' tugmasidan foydalaning."
         )
         return
 
@@ -1417,16 +1443,56 @@ def schedule_driver_reminders(customer_id: int):
         task = asyncio.create_task(_sleep_and_notify(delay, driver_id, text))
         order["reminder_tasks"].append(task)
 
+
+def build_draft_summary(d: dict) -> str:
+    region = d.get("region", "—")
+    return (
+        "📋 <b>Buyurtma ma'lumotlari</b>\n\n"
+        f"📍 Hudud: {region}\n"
+        f"🚚 Mashina: {d.get('vehicle', '—')}\n"
+        f"📍 Qayerdan: {d.get('from', '—')}\n"
+        f"📦 Qayerga: {d.get('to', '—')}\n"
+        f"🕒 Vaqt: {d.get('when', '—')}"
+    )
+
+
+async def send_draft_confirmation(uid: int, message: types.Message, d: dict) -> None:
+    summary = build_draft_summary(d)
+    ikb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Tasdiqlash", callback_data=f"draft_confirm_{uid}")],
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"draft_cancel_{uid}")],
+        ]
+    )
+    sent = await message.answer(summary, parse_mode="HTML", reply_markup=ikb)
+    d["confirm_msg_id"] = sent.message_id
+
+
+async def remove_confirm_message(uid: int, d: dict) -> None:
+    msg_id = d.pop("confirm_msg_id", None)
+    if msg_id:
+        try:
+            await bot.delete_message(chat_id=uid, message_id=msg_id)
+        except Exception:
+            pass
+
 # ================== GURUHGA YUBORISH + MIJOZGA BEKOR TUGMASI ==================
-async def finalize_and_send(message: types.Message, d: dict):
-    uid = message.from_user.id
+async def finalize_and_send(message_or_uid, d: dict):
+    if isinstance(message_or_uid, types.Message):
+        message = message_or_uid
+        uid = message.from_user.id
+    else:
+        message = None
+        uid = int(message_or_uid)
+
     region = d.get("region") or user_profiles.get(uid, {}).get("region")
     if not region:
-        drafts[uid]["stage"] = "region"
-        await message.answer(
-            "📍 Iltimos, hududni tanlang.",
-            reply_markup=region_keyboard(show_back=False)
-        )
+        drafts[uid] = d
+        prompt = "📍 Iltimos, hududni tanlang."
+        if message:
+            await message.answer(prompt, reply_markup=region_keyboard(show_back=False))
+        else:
+            await bot.send_message(uid, prompt, reply_markup=region_keyboard(show_back=False))
         return
 
     chat_id = d.get("chat_id") or get_order_chat_id(region)
@@ -1446,15 +1512,68 @@ async def finalize_and_send(message: types.Message, d: dict):
         "msg_id": sent.message_id,
         "chat_id": chat_id,
         "status": "open",
-        "driver_id": None, "cust_info_msg_id": None, "drv_info_msg_id": None,
-        "cust_rating_msg_id": None, "rating": None, "reminder_tasks": []
+        "driver_id": None,
+        "cust_info_msg_id": None,
+        "drv_info_msg_id": None,
+        "cust_rating_msg_id": None,
+        "rating": None,
+        "reminder_tasks": [],
     }
-    ikb_cust = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Buyurtmani bekor qilish", callback_data=f"cancel_{uid}")]
-    ])
-    await message.answer("✅ Buyurtma haydovchilarga yuborildi.\nKerak bo‘lsa bekor qilishingiz mumkin.", reply_markup=ikb_cust)
-    await message.answer("Asosiy menyu", reply_markup=order_keyboard())
+    ikb_cust = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Buyurtmani bekor qilish", callback_data=f"cancel_{uid}")]]
+    )
+    notify = "✅ Buyurtma haydovchilarga yuborildi.\nKerak bo‘lsa bekor qilishingiz mumkin."
+    if message:
+        await message.answer(notify, reply_markup=ikb_cust)
+        await message.answer("Asosiy menyu", reply_markup=order_keyboard())
+    else:
+        await bot.send_message(uid, notify, reply_markup=ikb_cust)
+        await bot.send_message(uid, "Asosiy menyu", reply_markup=order_keyboard())
     drafts.pop(uid, None)
+
+# ================== DRAFT TASDIQLASH CALLBACKLARI ==================
+@dp.callback_query(F.data.startswith("draft_confirm_"))
+async def draft_confirm_callback(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    if len(parts) < 3 or not parts[2].isdigit():
+        await callback.answer("Xato ID.", show_alert=True)
+        return
+    target_id = int(parts[2])
+    uid = callback.from_user.id
+    if uid != target_id:
+        await callback.answer("Bu tugma siz uchun emas.", show_alert=True)
+        return
+
+    draft = drafts.get(uid)
+    if not draft or draft.get("stage") != "confirm":
+        await callback.answer("Aktiv buyurtma topilmadi.", show_alert=True)
+        return
+
+    await remove_confirm_message(uid, draft)
+
+    await finalize_and_send(uid, draft)
+    await callback.answer("Buyurtma yuborildi!")
+
+
+@dp.callback_query(F.data.startswith("draft_cancel_"))
+async def draft_cancel_callback(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    if len(parts) < 3 or not parts[2].isdigit():
+        await callback.answer("Xato ID.", show_alert=True)
+        return
+    target_id = int(parts[2])
+    uid = callback.from_user.id
+    if uid != target_id:
+        await callback.answer("Bu tugma siz uchun emas.", show_alert=True)
+        return
+
+    draft = drafts.get(uid)
+    if draft:
+        await remove_confirm_message(uid, draft)
+    drafts.pop(uid, None)
+
+    await bot.send_message(uid, "❌ Buyurtma bekor qilindi.", reply_markup=order_keyboard())
+    await callback.answer("Bekor qilindi.")
 
 # ================== QABUL / YAKUN / BAHO / BEKOR ==================
 @dp.callback_query(F.data.startswith("accept_"))
