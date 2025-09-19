@@ -18,10 +18,24 @@ import os
 import json
 from typing import Any
 import csv
-from dotenv import load_dotenv
-
 # ================== SOZLAMALAR ==================
-load_dotenv()
+def _load_env():
+    env_path = os.path.join(BASE_DIR, '.env') if 'BASE_DIR' in globals() else '.env'
+    try:
+        with open(env_path, 'r', encoding='utf-8') as env_file:
+            for line in env_file:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                os.environ.setdefault(key.strip(), value.strip())
+    except FileNotFoundError:
+        pass
+
+
+_load_env()
 
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not TOKEN:
